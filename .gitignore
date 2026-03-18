@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+.npm
+
+# Build outputs
+dist/
+.angular/
+*.tsbuildinfo
+
+# Environment files (contain secrets)
+.env
+.env.local
+.env.*.local
+
+# Session data (generated at runtime)
+backend/data/sessions/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/settings.json
+.idea/
+
+# Coverage
+coverage/

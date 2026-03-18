@@ -1,0 +1,56 @@
+{
+  "sessionId": "demo-001",
+  "profile": {
+    "name": "Alex Johnson",
+    "age": 42,
+    "income": 120000,
+    "savings": 380000,
+    "monthly_expenses": 4200,
+    "retirement_age": 55,
+    "risk_tolerance": "medium",
+    "goals": ["retire at 55", "fund college for 2 kids", "travel budget $30k/yr"]
+  },
+  "simulation": {
+    "can_retire_at_target": false,
+    "projected_savings_at_retirement": 720000,
+    "monthly_shortfall_or_surplus": -1200,
+    "years_of_runway": 15,
+    "milestones": [
+      { "year": 2027, "savings": 500000, "note": "Kids college fund threshold" },
+      { "year": 2031, "savings": 620000, "note": "Investment portfolio milestone" },
+      { "year": 2037, "savings": 720000, "note": "Projected retirement savings at 55" }
+    ],
+    "summary": "Based on current savings rate and expenses, retiring at 55 is challenging. You would be short approximately $1,200/month to sustain your lifestyle."
+  },
+  "portfolio": {
+    "allocation": [
+      { "asset": "Equities", "percent": 55 },
+      { "asset": "Bonds", "percent": 30 },
+      { "asset": "Real Estate", "percent": 10 },
+      { "asset": "Cash", "percent": 5 }
+    ],
+    "strategy": "balanced",
+    "expected_annual_return_percent": 6.8,
+    "rebalance_frequency": "annually",
+    "rationale": "Medium risk tolerance at age 42 suggests a balanced approach with equity-heavy growth while maintaining bond exposure for stability."
+  },
+  "risk": {
+    "overall_risk_score": 5,
+    "risk_level": "medium",
+    "factors": [
+      { "factor": "Market Volatility", "impact": "medium", "description": "Diversified portfolio mitigates single-stock risk" },
+      { "factor": "Retirement Timeline", "impact": "high", "description": "13-year horizon is short for aggressive growth" },
+      { "factor": "Expense Growth", "impact": "medium", "description": "Inflation may erode purchasing power by 2-3% annually" }
+    ],
+    "mitigation_steps": [
+      "Increase monthly contributions by $500",
+      "Consider delaying retirement to age 60",
+      "Explore side income streams",
+      "Review discretionary spending"
+    ],
+    "stress_test": {
+      "market_crash_20pct_impact": -76000,
+      "inflation_spike_impact": -42000
+    }
+  }
+}
