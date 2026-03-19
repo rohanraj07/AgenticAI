@@ -1,4 +1,4 @@
-import { Component, EventEmitter, Output } from '@angular/core';
+import { Component, EventEmitter, Input, Output } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 
@@ -98,7 +98,7 @@ export interface ProfileFormData {
          style="padding:10px 16px; border-bottom:1px solid #2d3148; flex-shrink:0;
                 display:flex; align-items:center; justify-content:space-between; font-size:12px;">
       <span style="color:#94a3b8;">
-        Profile: <strong style="color:#e2e8f0;">{{form.name}}</strong>,
+        Profile: <strong style="color:#e2e8f0;">{{resolvedName || form.name}}</strong>,
         age {{form.age}},
         income \${{form.income | number}}
       </span>
@@ -111,6 +111,7 @@ export interface ProfileFormData {
 })
 export class ProfileFormComponent {
   @Output() profileReady = new EventEmitter<string>();
+  @Input() resolvedName: string | null = null;
 
   collapsed = false;
   submitted = false;

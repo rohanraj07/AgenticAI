@@ -155,6 +155,14 @@ export class ChatComponent implements OnInit, AfterViewChecked, OnDestroy {
   addAssistantMessage(content: string): void {
     this.messages.push({ role: 'assistant', content });
     this.shouldScroll = true;
+
+  resetSession(): void {
+    this.messages = [{ role: 'system', content: "Session reset. Hello! I'm your AI financial planner. Ask me anything." }];
+    this.sessionId = null;
+    this.loading   = false;
+    this.inputText = '';
+    this.shouldScroll = true;
+  }
   }
 
   ngOnDestroy(): void {
