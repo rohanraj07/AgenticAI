@@ -1,0 +1,76 @@
+================================================================================
+  SAMPLE TAX SUMMARY — FOR DEMO PURPOSES ONLY
+  Fictional data. Not a real tax document.
+================================================================================
+
+TAX YEAR: 2024
+FORM TYPE: 1040 Summary
+
+TAXPAYER INFORMATION
+  Filing Status:        Married Filing Jointly
+  Primary Taxpayer:     Alex Johnson
+  SSN:                  XXX-XX-1234  (redacted for demo)
+  Spouse:               Jordan Johnson
+
+INCOME SUMMARY
+  Wages & Salaries (W-2):          $148,500.00
+  Spouse Wages & Salaries (W-2):    $62,000.00
+  Interest Income:                   $1,240.00
+  Dividend Income:                   $3,800.00
+  Capital Gains (Long-Term):         $8,600.00
+  ─────────────────────────────────────────────
+  Total Gross Income:              $224,140.00
+
+ADJUSTMENTS TO INCOME
+  401(k) Contributions (Pre-Tax):  ($23,000.00)
+  Health Insurance Premiums (HSA):  ($3,200.00)
+  Student Loan Interest:              ($850.00)
+  ─────────────────────────────────────────────
+  Adjusted Gross Income (AGI):     $197,090.00
+
+DEDUCTIONS
+  Standard Deduction (MFJ 2024):   $29,200.00
+  Itemized Deductions:
+    Mortgage Interest:              $18,400.00
+    State & Local Taxes (SALT cap):  $10,000.00
+    Charitable Contributions:         $4,200.00
+    Total Itemized:                 $32,600.00
+  Deduction Used (higher of std/itemized): $32,600.00
+  ─────────────────────────────────────────────
+  Taxable Income:                  $164,490.00
+
+TAX CALCULATION
+  Marginal Tax Rate:                32%
+  Tax Before Credits:               $28,850.00
+  Child Tax Credit:                 ($4,000.00)
+  Education Credit:                 ($1,200.00)
+  ─────────────────────────────────────────────
+  Total Federal Tax:                $23,650.00
+  Effective Tax Rate:               10.55%
+
+TAX PAYMENTS
+  W-2 Federal Withholding:         $24,800.00
+  Estimated Tax Payments:           $2,000.00
+  ─────────────────────────────────────────────
+  Total Payments:                  $26,800.00
+
+RESULT
+  Refund Due:                       $3,150.00
+
+RETIREMENT ACCOUNT STATUS
+  401(k) Balance (estimated):      $287,000.00
+  IRA Balance (Roth):               $48,500.00
+  Employer Match (annual):           $6,000.00
+
+NOTES FROM PREPARER
+  - Consider increasing Roth IRA contributions (currently below max)
+  - HSA contribution room available ($2,650 remaining)
+  - Capital gains harvesting opportunity in taxable account
+  - Review SALT deduction strategy given $10K cap
+
+================================================================================
+  ⚠️  THIS IS FICTIONAL DEMO DATA
+  In the real system, this document is NEVER stored.
+  Only abstracted signals (income_range, tax_bracket, deductions_level)
+  are extracted and persisted. The raw document is discarded immediately.
+================================================================================

@@ -1,31 +1,39 @@
 import { StateGraph, END } from '@langchain/langgraph';
-import { PlannerAgent } from '../agents/planner.agent.js';
-import { ProfileAgent } from '../agents/profile.agent.js';
+import { PlannerAgent }    from '../agents/planner.agent.js';
+import { ProfileAgent }    from '../agents/profile.agent.js';
 import { SimulationAgent } from '../agents/simulation.agent.js';
-import { PortfolioAgent } from '../agents/portfolio.agent.js';
-import { RiskAgent } from '../agents/risk.agent.js';
+import { PortfolioAgent }  from '../agents/portfolio.agent.js';
+import { RiskAgent }       from '../agents/risk.agent.js';
 import { ExplanationAgent } from '../agents/explanation.agent.js';
+import { TaxAgent }        from '../agents/tax.agent.js';
+import { CashflowAgent }   from '../agents/cashflow.agent.js';
 import { log } from '../logger.js';
 
-const plannerAgent    = new PlannerAgent();
-const profileAgent    = new ProfileAgent();
-const simulationAgent = new SimulationAgent();
-const portfolioAgent  = new PortfolioAgent();
-const riskAgent       = new RiskAgent();
-const explanationAgent= new ExplanationAgent();
+const plannerAgent     = new PlannerAgent();
+const profileAgent     = new ProfileAgent();
+const simulationAgent  = new SimulationAgent();
+const portfolioAgent   = new PortfolioAgent();
+const riskAgent        = new RiskAgent();
+const explanationAgent = new ExplanationAgent();
+const taxAgent         = new TaxAgent();
+const cashflowAgent    = new CashflowAgent();
 
 const graphChannels = {
-  message:        { value: (a, b) => b ?? a, default: () => '' },
-  sessionContext: { value: (a, b) => b ?? a, default: () => '' },
-  ragContext:     { value: (a, b) => b ?? a, default: () => '' },
-  memory:         { value: (a, b) => b ?? a, default: () => '' },
-  plan:           { value: (a, b) => b ?? a, default: () => null },
-  profile:        { value: (a, b) => b ?? a, default: () => null },
-  simulation:     { value: (a, b) => b ?? a, default: () => null },
-  portfolio:      { value: (a, b) => b ?? a, default: () => null },
-  risk:           { value: (a, b) => b ?? a, default: () => null },
-  explanation:    { value: (a, b) => b ?? a, default: () => '' },
-  trace:          { value: (a, b) => [...(a || []), ...(b || [])], default: () => [] },
+  message:          { value: (a, b) => b ?? a, default: () => '' },
+  sessionContext:   { value: (a, b) => b ?? a, default: () => '' },
+  ragContext:       { value: (a, b) => b ?? a, default: () => '' },
+  memory:           { value: (a, b) => b ?? a, default: () => '' },
+  plan:             { value: (a, b) => b ?? a, default: () => null },
+  profile:          { value: (a, b) => b ?? a, default: () => null },
+  simulation:       { value: (a, b) => b ?? a, default: () => null },
+  portfolio:        { value: (a, b) => b ?? a, default: () => null },
+  risk:             { value: (a, b) => b ?? a, default: () => null },
+  tax:              { value: (a, b) => b ?? a, default: () => null },
+  cashflow:         { value: (a, b) => b ?? a, default: () => null },
+  taxInsights:      { value: (a, b) => b ?? a, default: () => null },
+  cashflowInsights: { value: (a, b) => b ?? a, default: () => null },
+  explanation:      { value: (a, b) => b ?? a, default: () => '' },
+  trace:            { value: (a, b) => [...(a || []), ...(b || [])], default: () => [] },
 };
 
 const DEFAULT_PROFILE = {
@@ -44,6 +52,8 @@ const DEFAULT_PORTFOLIO = {
   strategy: 'balanced', expected_annual_return_percent: 7,
   rebalance_frequency: 'annually', rationale: '',
 };
+
+// ── Node functions ────────────────────────────────────────────────────────────
 
 async function runPlanner(state) {
   const start = Date.now();
@@ -97,20 +107,48 @@ async function runRisk(state) {
   log.graph(`✔ node_risk DONE (${ms}ms) | score: ${risk.overall_risk_score}/10 | level: ${risk.risk_level}`);
   (risk.factors || []).forEach(f => log.graph(`  Factor: ${f.factor} [${f.impact}] — ${f.description?.slice(0,80)}`));
   (risk.mitigation_steps || []).forEach(s => log.graph(`  Mitigation: ${s}`));
-  if (risk.stress_test) {
-    log.graph(`  Stress test: market crash -20% → $${risk.stress_test.market_crash_20pct_impact} | inflation spike → $${risk.stress_test.inflation_spike_impact}`);
-  }
   return { risk, trace: [{ agent: 'risk', latencyMs: ms, output: risk }] };
+}
+
+async function runTax(state) {
+  const start = Date.now();
+  const taxInsights = state.taxInsights;
+  if (!taxInsights) {
+    log.graph('▶ node_tax SKIP — no taxInsights in state');
+    return {};
+  }
+  const profile = state.profile ?? DEFAULT_PROFILE;
+  const simulation = state.simulation ?? null;
+  log.graph(`▶ node_tax START | bracket: ${taxInsights.tax_bracket}, income: ${taxInsights.income_range}`);
+  const tax = await taxAgent.run(taxInsights, profile, simulation);
+  const ms = Date.now() - start;
+  log.graph(`✔ node_tax DONE (${ms}ms) | efficiency: ${tax.tax_efficiency_score}/10 | strategies: ${tax.optimization_strategies?.length}`);
+  return { tax, trace: [{ agent: 'tax', latencyMs: ms, output: tax }] };
+}
+
+async function runCashflow(state) {
+  const start = Date.now();
+  const cashflowInsights = state.cashflowInsights;
+  if (!cashflowInsights) {
+    log.graph('▶ node_cashflow SKIP — no cashflowInsights in state');
+    return {};
+  }
+  const profile = state.profile ?? DEFAULT_PROFILE;
+  log.graph(`▶ node_cashflow START | spending: ${cashflowInsights.spending_level}, savings: ${cashflowInsights.savings_rate}`);
+  const cashflow = await cashflowAgent.run(cashflowInsights, profile);
+  const ms = Date.now() - start;
+  log.graph(`✔ node_cashflow DONE (${ms}ms) | budget: ${cashflow.budget_health} | recommendations: ${cashflow.recommendations?.length}`);
+  return { cashflow, trace: [{ agent: 'cashflow', latencyMs: ms, output: cashflow }] };
 }
 
 async function runExplanation(state) {
   const start = Date.now();
   log.graph('▶ node_explanation START');
   const explanation = await explanationAgent.run(
-    state.profile ?? DEFAULT_PROFILE,
+    state.profile    ?? DEFAULT_PROFILE,
     state.simulation ?? DEFAULT_SIMULATION,
-    state.portfolio ?? DEFAULT_PORTFOLIO,
-    state.risk ?? null,
+    state.portfolio  ?? DEFAULT_PORTFOLIO,
+    state.risk       ?? null,
     state.message,
   );
   const ms = Date.now() - start;
@@ -118,29 +156,54 @@ async function runExplanation(state) {
   return { explanation, trace: [{ agent: 'explanation', latencyMs: ms, output: explanation }] };
 }
 
+// ── Routing functions ─────────────────────────────────────────────────────────
+
 function routeAfterPlanner(state) {
   const agents = state.plan?.agents || [];
-  const next = agents.includes('profile') ? 'node_profile' :
-               agents.includes('simulation') ? 'node_simulation' :
-               agents.includes('portfolio')  ? 'node_portfolio'  :
-               agents.includes('risk')       ? 'node_risk'       : 'node_explanation';
+  const next = agents.includes('profile')   ? 'node_profile'   :
+               agents.includes('tax')       ? 'node_tax'       :
+               agents.includes('cashflow')  ? 'node_cashflow'  :
+               agents.includes('simulation')? 'node_simulation':
+               agents.includes('portfolio') ? 'node_portfolio' :
+               agents.includes('risk')      ? 'node_risk'      : 'node_explanation';
   log.graph(`  route after planner → ${next}`);
   return next;
 }
 
 function routeAfterProfile(state) {
   const agents = state.plan?.agents || [];
-  const next = agents.includes('simulation') ? 'node_simulation' :
-               agents.includes('portfolio')  ? 'node_portfolio'  :
-               agents.includes('risk')       ? 'node_risk'       : 'node_explanation';
+  const next = agents.includes('tax')       ? 'node_tax'       :
+               agents.includes('cashflow')  ? 'node_cashflow'  :
+               agents.includes('simulation')? 'node_simulation':
+               agents.includes('portfolio') ? 'node_portfolio' :
+               agents.includes('risk')      ? 'node_risk'      : 'node_explanation';
   log.graph(`  route after profile → ${next}`);
+  return next;
+}
+
+function routeAfterTax(state) {
+  const agents = state.plan?.agents || [];
+  const next = agents.includes('cashflow')  ? 'node_cashflow'  :
+               agents.includes('simulation')? 'node_simulation':
+               agents.includes('portfolio') ? 'node_portfolio' :
+               agents.includes('risk')      ? 'node_risk'      : 'node_explanation';
+  log.graph(`  route after tax → ${next}`);
+  return next;
+}
+
+function routeAfterCashflow(state) {
+  const agents = state.plan?.agents || [];
+  const next = agents.includes('simulation')? 'node_simulation':
+               agents.includes('portfolio') ? 'node_portfolio' :
+               agents.includes('risk')      ? 'node_risk'      : 'node_explanation';
+  log.graph(`  route after cashflow → ${next}`);
   return next;
 }
 
 function routeAfterSimulation(state) {
   const agents = state.plan?.agents || [];
-  const next = agents.includes('portfolio') ? 'node_portfolio' :
-               agents.includes('risk')      ? 'node_risk'      : 'node_explanation';
+  const next = agents.includes('portfolio')? 'node_portfolio':
+               agents.includes('risk')     ? 'node_risk'     : 'node_explanation';
   log.graph(`  route after simulation → ${next}`);
   return next;
 }
@@ -152,35 +215,64 @@ function routeAfterPortfolio(state) {
   return next;
 }
 
+// ── Graph assembly ────────────────────────────────────────────────────────────
+
 export function buildFinancialGraph() {
   const graph = new StateGraph({ channels: graphChannels });
 
   graph.addNode('node_planner',     runPlanner);
   graph.addNode('node_profile',     runProfile);
+  graph.addNode('node_tax',         runTax);
+  graph.addNode('node_cashflow',    runCashflow);
   graph.addNode('node_simulation',  runSimulation);
   graph.addNode('node_portfolio',   runPortfolio);
   graph.addNode('node_risk',        runRisk);
   graph.addNode('node_explanation', runExplanation);
 
-  graph.setEntryPoint('node_planner');
+  graph.addEdge('__start__', 'node_planner');
 
   graph.addConditionalEdges('node_planner', routeAfterPlanner, {
-    node_profile: 'node_profile', node_simulation: 'node_simulation',
-    node_portfolio: 'node_portfolio', node_risk: 'node_risk', node_explanation: 'node_explanation',
+    node_profile:     'node_profile',
+    node_tax:         'node_tax',
+    node_cashflow:    'node_cashflow',
+    node_simulation:  'node_simulation',
+    node_portfolio:   'node_portfolio',
+    node_risk:        'node_risk',
+    node_explanation: 'node_explanation',
   });
   graph.addConditionalEdges('node_profile', routeAfterProfile, {
-    node_simulation: 'node_simulation', node_portfolio: 'node_portfolio',
-    node_risk: 'node_risk', node_explanation: 'node_explanation',
+    node_tax:         'node_tax',
+    node_cashflow:    'node_cashflow',
+    node_simulation:  'node_simulation',
+    node_portfolio:   'node_portfolio',
+    node_risk:        'node_risk',
+    node_explanation: 'node_explanation',
+  });
+  graph.addConditionalEdges('node_tax', routeAfterTax, {
+    node_cashflow:    'node_cashflow',
+    node_simulation:  'node_simulation',
+    node_portfolio:   'node_portfolio',
+    node_risk:        'node_risk',
+    node_explanation: 'node_explanation',
+  });
+  graph.addConditionalEdges('node_cashflow', routeAfterCashflow, {
+    node_simulation:  'node_simulation',
+    node_portfolio:   'node_portfolio',
+    node_risk:        'node_risk',
+    node_explanation: 'node_explanation',
   });
   graph.addConditionalEdges('node_simulation', routeAfterSimulation, {
-    node_portfolio: 'node_portfolio', node_risk: 'node_risk', node_explanation: 'node_explanation',
+    node_portfolio:   'node_portfolio',
+    node_risk:        'node_risk',
+    node_explanation: 'node_explanation',
   });
   graph.addConditionalEdges('node_portfolio', routeAfterPortfolio, {
-    node_risk: 'node_risk', node_explanation: 'node_explanation',
+    node_risk:        'node_risk',
+    node_explanation: 'node_explanation',
   });
-  graph.addEdge('node_risk', 'node_explanation');
+  graph.addEdge('node_risk',        'node_explanation');
   graph.addEdge('node_explanation', END);
 
-  log.graph('Financial graph compiled — nodes: planner→profile→simulation→portfolio→risk→explanation');
+  log.graph('Financial graph compiled — nodes: planner→profile→[tax→cashflow→]simulation→portfolio→risk→explanation');
   return graph.compile();
 }

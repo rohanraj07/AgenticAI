@@ -4,6 +4,7 @@ import cors from 'cors';
 import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
 import { chatRoute } from './routes/chat.route.js';
+import { uploadRoute } from './routes/upload.route.js';
 import { setupWebSocket } from './routes/ws.route.js';
 import { redisMemory, vectorStore } from './services.js';
 
@@ -13,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-app.get('/health', (req, res) => {
+app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
@@ -46,6 +47,7 @@ app.get('/api/health', async (_req, res) => {
 });
 
 app.use('/api', chatRoute);
+app.use('/api', uploadRoute);
 
 const httpServer = createServer(app);
 const wss = new WebSocketServer({ server: httpServer });

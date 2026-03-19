@@ -1,0 +1,118 @@
+================================================================================
+  SAMPLE BANK STATEMENT — FOR DEMO PURPOSES ONLY
+  Fictional data. Not a real bank statement.
+================================================================================
+
+ACCOUNT HOLDER: Alex Johnson
+ACCOUNT NUMBER: XXXXXX-7892  (redacted for demo)
+STATEMENT PERIOD: February 1, 2025 – February 28, 2025
+BANK: First National Demo Bank
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ACCOUNT SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Opening Balance (Feb 1):         $12,480.22
+  Total Credits (Deposits):        $15,875.00
+  Total Debits (Withdrawals):      $13,240.18
+  Closing Balance (Feb 28):        $15,115.04
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+INCOME / CREDITS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Feb 01  Direct Deposit — Primary Payroll          $8,250.00
+  Feb 15  Direct Deposit — Spouse Payroll           $5,100.00
+  Feb 20  Transfer from Savings                     $1,500.00
+  Feb 28  Interest Earned                              $25.00
+  ─────────────────────────────────────────────────────────
+  TOTAL INCOME (Feb):                              $14,875.00
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EXPENSES / DEBITS BY CATEGORY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+HOUSING
+  Feb 01  Mortgage Payment — Wells Fargo            $2,850.00
+  Feb 05  Home Insurance Premium                      $145.00
+  Feb 15  HOA Fees                                    $220.00
+  SUBTOTAL HOUSING:                                 $3,215.00
+
+FOOD & DINING
+  Feb 03  Whole Foods Market                          $187.42
+  Feb 07  Trader Joe's                                $124.18
+  Feb 10  Chipotle                                     $42.50
+  Feb 12  Starbucks                                    $38.60
+  Feb 17  Whole Foods Market                          $215.30
+  Feb 19  DoorDash — Dinner delivery                  $67.80
+  Feb 22  Cheesecake Factory — Dinner                 $94.40
+  Feb 24  Trader Joe's                                $108.22
+  Feb 28  Starbucks                                    $31.40
+  SUBTOTAL FOOD & DINING:                             $909.82
+
+TRANSPORTATION
+  Feb 01  Auto Loan Payment                           $487.00
+  Feb 05  Shell Gas Station                            $68.20
+  Feb 12  Shell Gas Station                            $71.40
+  Feb 15  Uber                                         $24.60
+  Feb 22  Auto Insurance — Geico                      $163.00
+  SUBTOTAL TRANSPORTATION:                            $814.20
+
+UTILITIES
+  Feb 10  PG&E — Electric/Gas                        $189.40
+  Feb 12  AT&T — Internet + Phone                    $175.00
+  Feb 15  Water & Sewer                               $68.20
+  SUBTOTAL UTILITIES:                                 $432.60
+
+SUBSCRIPTIONS & STREAMING
+  Feb 01  Netflix                                      $22.99
+  Feb 01  Spotify Family                               $16.99
+  Feb 01  Amazon Prime                                 $14.99
+  Feb 05  Adobe Creative Cloud                         $54.99
+  Feb 10  Apple iCloud                                  $2.99
+  SUBTOTAL SUBSCRIPTIONS:                             $112.95
+
+HEALTH & WELLNESS
+  Feb 05  CVS Pharmacy — Prescriptions               $48.20
+  Feb 10  Planet Fitness Membership                   $24.99
+  Feb 20  Dental Visit — Copay                        $85.00
+  SUBTOTAL HEALTH:                                    $158.19
+
+SAVINGS & INVESTMENTS
+  Feb 01  Transfer → High-Yield Savings             $1,500.00
+  Feb 01  Fidelity 401(k) auto-deduct (pre-tax)     $1,916.67
+  Feb 15  Roth IRA Contribution                       $583.33
+  SUBTOTAL SAVINGS:                                 $4,000.00
+
+ENTERTAINMENT & SHOPPING
+  Feb 08  Amazon — Books & Electronics               $124.80
+  Feb 14  AMC Theaters                                $48.00
+  Feb 18  Target — Household items                   $187.60
+  Feb 25  Gap — Clothing                             $234.50
+  SUBTOTAL ENTERTAINMENT:                             $594.90
+
+OTHER
+  Feb 20  Kids School Activity Fee                   $150.00
+  Feb 22  Venmo — Split dinner with friends           $52.52
+  SUBTOTAL OTHER:                                     $202.52
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MONTHLY SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Total Monthly Income:                            $14,875.00
+  Total Monthly Spending (excl. savings):           $9,440.18
+  Total Savings:                                    $4,000.00
+  Net Cash Flow:                                    $1,434.82
+  Savings Rate:                                     26.9%
+
+SPENDING BREAKDOWN %
+  Housing:          34.1%   ████████████████████
+  Food & Dining:     9.6%   █████
+  Transportation:    8.6%   █████
+  Savings:          42.4%   █████████████████████████
+  Other:             5.3%   ███
+
+================================================================================
+  ⚠️  THIS IS FICTIONAL DEMO DATA
+  In the real system, this document is NEVER stored.
+  Only abstracted signals (spending_level, savings_rate, budget_health)
+  are extracted. Account numbers and exact amounts are never persisted.
+================================================================================

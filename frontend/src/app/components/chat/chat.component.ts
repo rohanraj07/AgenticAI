@@ -70,6 +70,7 @@ export class ChatComponent implements OnInit, AfterViewChecked, OnDestroy {
     ui: { type: string }[];
     data: Record<string, unknown>;
     trace: unknown[];
+    sessionId?: string;
   }>();
 
   @ViewChild('scrollArea') private scrollArea!: ElementRef<HTMLDivElement>;
@@ -124,7 +125,7 @@ export class ChatComponent implements OnInit, AfterViewChecked, OnDestroy {
           this.sessionId = res.sessionId;
           this.messages.push({ role: 'assistant', content: res.message });
           this.shouldScroll = true;
-          this.responseReceived.emit({ ui: res.ui, data: res.data, trace: res.trace });
+          this.responseReceived.emit({ ui: res.ui, data: res.data, trace: res.trace, sessionId: res.sessionId });
           this.wsService.connect(res.sessionId);
           // Re-focus input after response
           setTimeout(() => this.inputEl?.nativeElement.focus(), 50);
@@ -148,6 +149,12 @@ export class ChatComponent implements OnInit, AfterViewChecked, OnDestroy {
     if (msg.type === 'AGENT_STARTED') {
       // loading indicator already shown
     }
+  }
+
+  /** Called by AppComponent when an upload completes — surfaces result in chat */
+  addAssistantMessage(content: string): void {
+    this.messages.push({ role: 'assistant', content });
+    this.shouldScroll = true;
   }
 
   ngOnDestroy(): void {

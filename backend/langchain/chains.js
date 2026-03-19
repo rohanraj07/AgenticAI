@@ -8,6 +8,9 @@ import {
   portfolioPrompt,
   riskPrompt,
   explanationPrompt,
+  documentIngestionPrompt,
+  taxPrompt,
+  cashflowPrompt,
 } from './prompts.js';
 
 const jsonParser = new JsonOutputParser();
@@ -47,4 +50,22 @@ export const explanationChain = RunnableSequence.from([
   explanationPrompt,
   llm,
   stringParser,
+]);
+
+export const documentIngestionChain = RunnableSequence.from([
+  documentIngestionPrompt,
+  llm,
+  jsonParser,
+]);
+
+export const taxChain = RunnableSequence.from([
+  taxPrompt,
+  llm,
+  jsonParser,
+]);
+
+export const cashflowChain = RunnableSequence.from([
+  cashflowPrompt,
+  llm,
+  jsonParser,
 ]);
