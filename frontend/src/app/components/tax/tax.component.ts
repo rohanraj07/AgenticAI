@@ -113,7 +113,7 @@ export class TaxComponent {
   @Input() tax: Record<string, unknown> | null = null;
 
   get strategies(): Array<{ strategy: string; estimated_impact: string; priority: string; rationale?: string }> {
-    return ($any(this.tax?.['optimization_strategies']) as any[]) || [];
+    return (this.tax?.['optimization_strategies'] as any[]) || [];
   }
 
   get efficiencyClass(): string {

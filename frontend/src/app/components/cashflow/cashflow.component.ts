@@ -126,11 +126,11 @@ export class CashflowComponent {
   @Input() cashflow: Record<string, unknown> | null = null;
 
   get categories(): string[] {
-    return (this.$any(this.cashflow?.['top_spending_categories']) as string[]) || [];
+    return (this.cashflow?.['top_spending_categories'] as string[]) || [];
   }
 
   get recommendations(): Array<{ action: string; estimated_monthly_saving: string; priority: string; impact_on_retirement?: string }> {
-    return (this.$any(this.cashflow?.['recommendations']) as any[]) || [];
+    return (this.cashflow?.['recommendations'] as any[]) || [];
   }
 
   get budgetHealthLabel(): string {
