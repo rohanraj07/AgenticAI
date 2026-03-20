@@ -15,6 +15,7 @@ export class SimulationAgent {
       profile: JSON.stringify(profile, null, 2),
       message,
       ragContext,
+      currentYear: new Date().getFullYear(),
     });
 
     const simulation = {

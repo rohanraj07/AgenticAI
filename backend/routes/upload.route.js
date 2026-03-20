@@ -68,7 +68,7 @@ uploadRoute.post('/upload', upload.single('document'), async (req, res) => {
 
     // 2. Load existing session
     const session = (await redisMemory.getSession(sessionId)) || {};
-    const ragContext = await vectorStore.searchAsContext(`financial document ${fileName}`);
+    const ragContext = await vectorStore.searchAsContext(`financial document ${fileName}`, sessionId);
 
     // 3. Run document ingestion agent — extracts abstractions, discards raw values
     log.route('  Running DocumentIngestionAgent...');

@@ -2,6 +2,8 @@
   "/api": {
     "target": "http://localhost:3000",
     "secure": false,
-    "changeOrigin": true
+    "changeOrigin": true,
+    "proxyTimeout": 120000,
+    "timeout": 120000
   }
 }

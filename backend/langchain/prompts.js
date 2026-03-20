@@ -61,6 +61,8 @@ Respond ONLY with valid JSON:
 export const simulationPrompt = PromptTemplate.fromTemplate(`
 You are the Simulation Agent. Run a financial projection based on user profile.
 
+Current year: {currentYear}
+
 Profile:
 {profile}
 
@@ -69,6 +71,8 @@ RAG context:
 
 User message: {message}
 
+Retirement year = {currentYear} + (retirement_age - age). Generate EXACTLY 3 milestones at roughly equal intervals.
+
 Respond ONLY with valid JSON:
 {{
   "can_retire_at_target": true,
@@ -76,7 +80,9 @@ Respond ONLY with valid JSON:
   "monthly_shortfall_or_surplus": 0,
   "years_of_runway": 0,
   "milestones": [
-    {{"year": 2030, "savings": 0, "note": ""}}
+    {{"year": 2031, "savings": 0, "note": ""}},
+    {{"year": 2041, "savings": 0, "note": ""}},
+    {{"year": 2051, "savings": 0, "note": ""}}
   ],
   "summary": "..."
 }}
@@ -126,12 +132,14 @@ Respond ONLY with valid JSON:
   "factors": [
     {{"factor": "Market Volatility", "impact": "high", "description": "..."}}
   ],
-  "mitigation_steps": [],
+  "mitigation_steps": ["Increase emergency fund to 6 months expenses", "Diversify equity holdings across sectors"],
   "stress_test": {{
     "market_crash_20pct_impact": 0,
     "inflation_spike_impact": 0
   }}
 }}
+
+IMPORTANT: mitigation_steps must be a flat array of plain strings — no nested objects.
 `);
 
 // ── Explanation ───────────────────────────────────────────────────────────────

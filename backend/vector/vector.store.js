@@ -48,12 +48,14 @@ export class VectorStore {
     log.vector('  → stored in fallback (total:', this._fallbackDocs.length, 'docs)');
   }
 
-  async search(query) {
-    log.vector('SEARCH query:', query.slice(0, 80) + (query.length > 80 ? '...' : ''));
+  async search(query, sessionId = null) {
+    log.vector('SEARCH query:', query.slice(0, 80) + (query.length > 80 ? '...' : ''), sessionId ? `| session: ${sessionId}` : '');
     if (this._useChroma) {
       try {
         const [queryVector] = await embeddings.embedDocuments([query]);
-        const results = await this.collection.query({ queryEmbeddings: [queryVector], nResults: TOP_K });
+        const queryParams = { queryEmbeddings: [queryVector], nResults: TOP_K };
+        if (sessionId) queryParams.where = { sessionId };
+        const results = await this.collection.query(queryParams);
         const docs = results?.documents?.[0]?.filter(Boolean) || [];
         log.vector(`  → ChromaDB returned ${docs.length} results`);
         docs.forEach((d, i) => log.vector(`  [${i+1}] ${d.slice(0, 100)}...`));
@@ -63,13 +65,16 @@ export class VectorStore {
       }
     }
     const q = query.toLowerCase();
-    const results = this._fallbackDocs.filter((d) => d.text.toLowerCase().includes(q)).slice(-TOP_K).map((d) => d.text);
-    log.vector(`  → fallback keyword search: ${results.length} results`);
+    const pool = sessionId
+      ? this._fallbackDocs.filter((d) => d.metadata?.sessionId === sessionId)
+      : this._fallbackDocs;
+    const results = pool.filter((d) => d.text.toLowerCase().includes(q)).slice(-TOP_K).map((d) => d.text);
+    log.vector(`  → fallback keyword search: ${results.length} results (session-scoped: ${!!sessionId})`);
     return results;
   }
 
-  async searchAsContext(query) {
-    const docs = await this.search(query);
+  async searchAsContext(query, sessionId = null) {
+    const docs = await this.search(query, sessionId);
     const ctx = docs.join('\n\n---\n\n');
     log.vector('searchAsContext → context length:', ctx.length, 'chars');
     return ctx;

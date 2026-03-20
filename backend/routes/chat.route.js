@@ -29,9 +29,9 @@ chatRoute.post('/chat', async (req, res) => {
     const conversationHistory = await redisMemory.getConversationString(sessionId);
     log.route(`  session loaded | existing profile: ${!!session.profile} | history: ${conversationHistory.split('\n').filter(Boolean).length} messages`);
 
-    // 2. RAG retrieval
+    // 2. RAG retrieval — scoped to this session to prevent cross-user data pollution
     log.route('  RAG: searching vector store...');
-    const ragContext = await vectorStore.searchAsContext(message);
+    const ragContext = await vectorStore.searchAsContext(message, sessionId);
     log.route(`  RAG: context retrieved (${ragContext.length} chars)`);
 
     // 3. Markdown context

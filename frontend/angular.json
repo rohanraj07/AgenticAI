@@ -40,6 +40,9 @@
         },
         "serve": {
           "builder": "@angular-devkit/build-angular:dev-server",
+          "options": {
+            "proxyConfig": "proxy.conf.json"
+          },
           "configurations": {
             "production": { "buildTarget": "financial-planner:build:production" },
             "development": { "buildTarget": "financial-planner:build:development" }
