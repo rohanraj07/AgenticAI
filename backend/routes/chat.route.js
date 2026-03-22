@@ -18,7 +18,7 @@ chatRoute.post('/chat', async (req, res) => {
   }
 
   const sessionId = incomingSessionId || uuidv4();
-  const reqStart = Date.now();
+  const reqStart  = Date.now();
 
   log.route(`POST /chat | session: ${sessionId}`);
   log.route(`  message: "${message.slice(0, 100)}${message.length > 100 ? '...' : ''}"`);
@@ -27,57 +27,80 @@ chatRoute.post('/chat', async (req, res) => {
     // 1. Load session memory
     const session = (await redisMemory.getSession(sessionId)) || {};
     const conversationHistory = await redisMemory.getConversationString(sessionId);
-    log.route(`  session loaded | existing profile: ${!!session.profile} | history: ${conversationHistory.split('\n').filter(Boolean).length} messages`);
+    const docInsights = session.documentInsights || {};
+    log.route(`  session loaded | profile: ${!!session.profile} | docInsights: [${Object.keys(docInsights).join(', ')||'none'}] | history: ${conversationHistory.split('\n').filter(Boolean).length} msgs`);
 
-    // 2. RAG retrieval — scoped to this session to prevent cross-user data pollution
-    log.route('  RAG: searching vector store...');
+    // 2. RAG retrieval — scoped to this session
     const ragContext = await vectorStore.searchAsContext(message, sessionId);
-    log.route(`  RAG: context retrieved (${ragContext.length} chars)`);
+    log.route(`  RAG: ${ragContext.length} chars`);
 
     // 3. Markdown context
     const markdownCtx = markdownMemory.read(sessionId);
-    log.route(`  Markdown memory: ${markdownCtx.length > 0 ? markdownCtx.length + ' chars' : 'empty (first session)'}`);
 
     // 4. Save user message
     await redisMemory.appendMessage(sessionId, 'user', message);
 
-    // 5. Emit agent started
+    // 5. Emit planner started
     eventEmitter.emitAgentStarted(sessionId, 'planner');
 
     // 6. Run LangGraph pipeline
     log.route('  LangGraph: invoking pipeline...');
     const graphStart = Date.now();
+
     const finalState = await financialGraph.invoke({
       message,
       sessionContext: conversationHistory || markdownCtx,
       ragContext,
-      memory: markdownCtx,
-      profile: session.profile || null,
+      memory:         markdownCtx,
+      profile:        session.profile     || null,
+      _sessionId:     sessionId,
+      // Reload document insights from session so tax/cashflow agents can run
+      // if the planner routes to them (e.g. "tell me more about my taxes")
+      taxInsights:        docInsights.tax        || null,
+      cashflowInsights:   docInsights.cashflow   || null,
+      portfolioInsights:  docInsights.portfolio  || null,
+      debtInsights:       docInsights.debt       || null,
+      // plannerContext: session-awareness hints so planner doesn't re-run profile needlessly
+      plannerContext: {
+        profileExists:        !!session.profile,
+        simulationExists:     !!session.simulation,
+      },
     });
-    log.route(`  LangGraph: pipeline complete (${Date.now() - graphStart}ms)`);
 
-    const { plan, profile, simulation, portfolio, risk, explanation, trace } = finalState;
+    log.route(`  LangGraph: complete (${Date.now() - graphStart}ms)`);
 
-    // 7. Emit reactive events + persist to Redis
+    const { plan, profile, simulation, portfolio, risk, tax, cashflow, explanation, trace } = finalState;
+
+    // 7. Persist to Redis + emit reactive events
     if (profile) {
       await redisMemory.updateSession(sessionId, { profile });
       eventEmitter.emitProfileUpdated(sessionId, profile);
-      log.route('  → profile saved & event emitted');
+      log.route('  → profile saved');
     }
     if (simulation) {
       await redisMemory.updateSession(sessionId, { simulation });
       eventEmitter.emitSimulationUpdated(sessionId, simulation);
-      log.route(`  → simulation saved | can_retire=${simulation.can_retire_at_target} | projected=$${simulation.projected_savings_at_retirement}`);
+      log.route(`  → simulation saved | can_retire=${simulation.can_retire_at_target}`);
     }
     if (portfolio) {
       await redisMemory.updateSession(sessionId, { portfolio });
       eventEmitter.emitPortfolioUpdated(sessionId, portfolio);
-      log.route(`  → portfolio saved | strategy=${portfolio.strategy} | return=${portfolio.expected_annual_return_percent}%`);
+      log.route(`  → portfolio saved | strategy=${portfolio.strategy}`);
     }
     if (risk) {
       await redisMemory.updateSession(sessionId, { risk });
       eventEmitter.emitRiskUpdated(sessionId, risk);
-      log.route(`  → risk saved | score=${risk.overall_risk_score}/10 | level=${risk.risk_level}`);
+      log.route(`  → risk saved | score=${risk.overall_risk_score}/10`);
+    }
+    if (tax) {
+      await redisMemory.updateSession(sessionId, { tax });
+      eventEmitter.emitTaxUpdated(sessionId, tax);
+      log.route(`  → tax saved | efficiency=${tax.tax_efficiency_score}/10`);
+    }
+    if (cashflow) {
+      await redisMemory.updateSession(sessionId, { cashflow });
+      eventEmitter.emitCashflowUpdated(sessionId, cashflow);
+      log.route(`  → cashflow saved | budget=${cashflow.budget_health}`);
     }
     if (explanation) {
       eventEmitter.emitExplanationReady(sessionId, explanation);
@@ -85,9 +108,8 @@ chatRoute.post('/chat', async (req, res) => {
 
     // 8. Write markdown + vector snapshot
     if (profile) {
-      log.route('  Writing markdown memory snapshot...');
       const md = markdownMemory.write(sessionId, profile, simulation, portfolio, risk);
-      log.route(`  Markdown written to data/sessions/${sessionId}.md (${md.length} chars)`);
+      log.route(`  Markdown written (${md.length} chars)`);
       await vectorStore.storeSessionSnapshot(sessionId, md);
     }
 
@@ -97,17 +119,23 @@ chatRoute.post('/chat', async (req, res) => {
     // 10. Trace summary
     if (trace?.length) {
       const total = trace.reduce((s, t) => s + (t.latencyMs || 0), 0);
-      log.route(`  Trace: [${trace.map(t => `${t.agent}:${t.latencyMs}ms`).join(' → ')}] total=${total}ms`);
+      log.route(`  Trace: [${trace.map((t) => `${t.agent}:${t.latencyMs}ms`).join(' → ')}] total=${total}ms`);
     }
 
     const totalMs = Date.now() - reqStart;
-    log.route(`  Response sent | ui=[${(plan?.ui||[]).map(u=>u.type).join(', ')}] | total=${totalMs}ms`);
+    log.route(`  Response sent | ui=[${(plan?.ui || []).map((u) => u.type).join(', ')}] | total=${totalMs}ms`);
 
     res.json({
       sessionId,
       message: explanation || plan?.intent || 'Processing complete.',
-      ui: plan?.ui || [],
-      data: { profile, simulation, portfolio, risk },
+      ui:      plan?.ui || [],
+      data:    { profile, simulation, portfolio, risk, tax, cashflow },
+      meta: {
+        intent:             plan?.intent,
+        confidence:         plan?.confidence,
+        decision_rationale: plan?.decision_rationale,
+        missing_data:       plan?.missing_data || [],
+      },
       trace: trace || [],
     });
   } catch (err) {

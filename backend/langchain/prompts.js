@@ -3,33 +3,47 @@ import { PromptTemplate } from '@langchain/core/prompts';
 // ── Planner ──────────────────────────────────────────────────────────────────
 export const plannerPrompt = PromptTemplate.fromTemplate(`
 You are the Planner Agent for a financial planning system.
-Your job is to:
-1. Interpret the user's financial question.
-2. Decide which sub-agents to invoke.
-   Available agents: profile, simulation, portfolio, risk, tax, cashflow, explanation
-3. Return the UI components that should be rendered.
-   Available UI types: profile_summary, simulation_chart, portfolio_view, risk_dashboard, tax_panel, cashflow_panel, explanation_panel
+Analyze the user's message and decide which agents to invoke.
 
-User session context:
+Available agents: profile, simulation, portfolio, risk, tax, cashflow, explanation
+Available UI types: profile_summary, simulation_chart, portfolio_view, risk_dashboard, tax_panel, cashflow_panel, explanation_panel
+
+Session context (may be empty on first message):
 {context}
+
+Profile already exists: {profileExists}
+Simulation already exists: {simulationExists}
 
 User message: {message}
 
-Respond ONLY with valid JSON in this exact shape:
+Decision rules:
+- ALWAYS include "explanation" as the final agent.
+- Include "profile" if this is the first message or if user shares new personal details (age, income, goals).
+- Include "simulation" if user asks about retirement, savings goals, projections, or financial future.
+- Include "portfolio" only if user asks about investments or allocations (requires simulation).
+- Include "risk" only if user asks about risk, market exposure, or volatility (requires portfolio).
+- Include "tax" only if context explicitly mentions taxes, deductions, or tax optimization.
+- Include "cashflow" only if context explicitly mentions spending, budget, or monthly cash flow.
+- Set confidence to "high" if intent is unambiguous, "medium" if somewhat unclear, "low" if very vague.
+- List in "missing_data" any document types that would improve the analysis (e.g. "tax_document", "bank_statement").
+
+Respond ONLY with valid JSON:
 {{
   "intent": "<one-line description of user intent>",
-  "agents": ["profile", "simulation", "portfolio", "risk", "explanation"],
+  "required_agents": ["profile", "simulation", "explanation"],
+  "optional_agents": ["portfolio"],
+  "missing_data": ["tax_document"],
+  "confidence": "high|medium|low",
+  "decision_rationale": "Included simulation because user asked about retirement timeline.",
+  "agents": ["profile", "simulation", "explanation"],
   "ui": [
     {{"type": "profile_summary"}},
     {{"type": "simulation_chart"}},
-    {{"type": "portfolio_view"}},
-    {{"type": "risk_dashboard"}},
     {{"type": "explanation_panel"}}
   ],
   "params": {{}}
 }}
-Only include agents and UI components that are relevant to the user's request.
-Include tax agent and tax_panel if context mentions tax. Include cashflow agent and cashflow_panel if context mentions spending or cashflow.
+Only include agents and UI components relevant to the user's request.
 `);
 
 // ── Profile ───────────────────────────────────────────────────────────────────

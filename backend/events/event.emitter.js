@@ -1,14 +1,17 @@
 import { EventEmitter } from 'events';
 
 export const EVENTS = {
-  PROFILE_UPDATED: 'PROFILE_UPDATED',
-  SIMULATION_UPDATED: 'SIMULATION_UPDATED',
-  PORTFOLIO_UPDATED: 'PORTFOLIO_UPDATED',
-  RISK_UPDATED: 'RISK_UPDATED',
-  EXPLANATION_READY: 'EXPLANATION_READY',
-  AGENT_STARTED: 'AGENT_STARTED',
-  AGENT_COMPLETED: 'AGENT_COMPLETED',
-  SESSION_UPDATED: 'SESSION_UPDATED',
+  PROFILE_UPDATED:     'PROFILE_UPDATED',
+  SIMULATION_UPDATED:  'SIMULATION_UPDATED',
+  PORTFOLIO_UPDATED:   'PORTFOLIO_UPDATED',
+  RISK_UPDATED:        'RISK_UPDATED',
+  TAX_UPDATED:         'TAX_UPDATED',
+  CASHFLOW_UPDATED:    'CASHFLOW_UPDATED',
+  EXPLANATION_READY:   'EXPLANATION_READY',
+  AGENT_STARTED:       'AGENT_STARTED',
+  AGENT_COMPLETED:     'AGENT_COMPLETED',
+  PLANNER_DECIDED:     'PLANNER_DECIDED',
+  SESSION_UPDATED:     'SESSION_UPDATED',
 };
 
 /**
@@ -37,6 +40,14 @@ export class AppEventEmitter extends EventEmitter {
     this.emit(EVENTS.RISK_UPDATED, { sessionId, risk });
   }
 
+  emitTaxUpdated(sessionId, tax) {
+    this.emit(EVENTS.TAX_UPDATED, { sessionId, tax });
+  }
+
+  emitCashflowUpdated(sessionId, cashflow) {
+    this.emit(EVENTS.CASHFLOW_UPDATED, { sessionId, cashflow });
+  }
+
   emitExplanationReady(sessionId, explanation) {
     this.emit(EVENTS.EXPLANATION_READY, { sessionId, explanation });
   }
@@ -45,7 +56,11 @@ export class AppEventEmitter extends EventEmitter {
     this.emit(EVENTS.AGENT_STARTED, { sessionId, agentName });
   }
 
-  emitAgentCompleted(sessionId, agentName, output) {
-    this.emit(EVENTS.AGENT_COMPLETED, { sessionId, agentName, output });
+  emitAgentCompleted(sessionId, agentName, latencyMs, output) {
+    this.emit(EVENTS.AGENT_COMPLETED, { sessionId, agentName, latencyMs, output });
+  }
+
+  emitPlannerDecided(sessionId, plan) {
+    this.emit(EVENTS.PLANNER_DECIDED, { sessionId, plan });
   }
 }
