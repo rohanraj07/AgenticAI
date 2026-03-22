@@ -20,6 +20,14 @@
 11. [Operational Playbook](#11-operational-playbook)
 12. [Sample End-to-End Flows](#12-sample-end-to-end-flows)
 13. [WebSocket Role](#13-websocket-role)
+14. [LLM vs Deterministic — Full Agent Map](#14-llm-vs-deterministic--full-agent-map)
+15. [PII Enforcement Fix](#15-pii-enforcement-fix)
+16. [Session Atomicity & Concurrency](#16-session-atomicity--concurrency)
+17. [Vector DB Isolation Guarantees](#17-vector-db-isolation-guarantees)
+18. [Planner Decision Deep Dive](#18-planner-decision-deep-dive)
+19. [Data Lifecycle & Retention](#19-data-lifecycle--retention)
+20. [Trust Boundaries](#20-trust-boundaries)
+21. [Concurrency & Event Ordering](#21-concurrency--event-ordering)
 
 ---
 
@@ -1170,5 +1178,767 @@ DynamicRendererComponent (subscribes)
 | `SIMULATION_UPDATED` | Not wired to renderer | Live chart rendering as simulation completes |
 | `EXPLANATION_READY` | Not wired to renderer | Chat message streaming |
 | `PLANNER_DECIDED` | Not used | Show agent pipeline plan to user |
+
+---
+
+## 14. LLM vs Deterministic — Full Agent Map
+
+### Which Components Call the LLM
+
+Every agent that invokes a LangChain chain makes an LLM call. Output is non-deterministic — the same input can produce different wording on every run.
+
+| Agent | Chain | LLM is asked to |
+|---|---|---|
+| **PlannerAgent** | `plannerChain` | Classify intent, select agents, plan UI |
+| **ProfileAgent** | `profileChain` | Extract name, age, income, goals from message |
+| **SimulationAgent** | `simulationChain` | Project savings forward, generate 3 milestones |
+| **PortfolioAgent** | `portfolioChain` | Recommend asset allocation percentages |
+| **RiskAgent** | `riskChain` | Score risk, identify factors and mitigations |
+| **TaxAgent** | `taxChain` | Generate tax optimization strategies |
+| **CashflowAgent** | `cashflowChain` | Generate spending reduction recommendations |
+| **ExplanationAgent** | `explanationChain` | Write human-readable summary (plain text) |
+| **DocumentIngestionAgent** | `documentIngestionChain` | Classify document, extract raw ephemeral values |
+
+**Total LLM calls in a full pipeline run**: up to 9 (one per agent that is routed to).
+
+### Which Components are Purely Deterministic
+
+These components contain **zero LLM calls**. Output is fully predictable for the same input.
+
+| Component | File | What it does |
+|---|---|---|
+| LangGraph routing functions | `graph.js` | `if agents.includes('portfolio')` → next node |
+| `withFallback()` wrapper | `graph.js` | try/catch per node, event emission |
+| PlannerAgent guardrails | `planner.agent.js` | Enforce `explanation` always present, dependency rules |
+| `SAFE_DEFAULT_PLAN` | `planner.agent.js` | Static fallback object returned on chain failure |
+| Tax sub-agents | `subagents/tax.subagents.js` | Normalize signals, score deductions, sort strategies |
+| Cashflow sub-agents | `subagents/cashflow.subagents.js` | Normalize signals, classify risk, score savings |
+| PII sanitizer | `utils/pii.sanitizer.js` | Map raw numbers to range labels (threshold logic) |
+| `ROUTING_MAP` | `utils/document.routing.js` | Static document-type → agents/UI lookup |
+| Redis reads/writes | `memory/redis.memory.js` | Pure I/O |
+| Markdown read/write | `memory/markdown.memory.js` | Pure file I/O + string formatting |
+| Vector store add/search | `vector/vector.store.js` | ChromaDB API calls (deterministic given same embedding model) |
+| Session ID generation | `uuid` library | Cryptographically random UUID |
+
+### Mental Model
+
+```
+┌────────────────────────────────────────────────────────┐
+│  NON-DETERMINISTIC  (LLM)                              │
+│                                                        │
+│  PlannerAgent → decides WHAT to run                    │
+│  ProfileAgent → decides WHAT the profile IS            │
+│  SimulationAgent → decides HOW to narrate projections  │
+│  ...all other agents → decide WHAT to say              │
+└────────────────────────────────────────────────────────┘
+         ↓ output (JSON or text)
+┌────────────────────────────────────────────────────────┐
+│  DETERMINISTIC  (Code)                                 │
+│                                                        │
+│  LangGraph → decides WHICH node runs NEXT              │
+│  Guardrails → enforce dependency rules on plan         │
+│  Sub-agents → post-process + rank LLM output           │
+│  PII sanitizer → redact raw values to range labels     │
+│  Redis/Markdown/Vector → store only what code permits  │
+└────────────────────────────────────────────────────────┘
+```
+
+> **Key principle**: LLMs decide *content*. Code decides *control flow, storage, and safety*.
+
+---
+
+## 15. PII Enforcement Fix
+
+### The Contradiction
+
+The original Redis schema stored raw numeric values in the `profile` object:
+
+```json
+{ "income": 80000, "savings": 200000, "monthly_expenses": 3500 }
+```
+
+These are exact financial figures — **PII by the system's own definition**. Storing them in Redis contradicts the trust-by-design principle.
+
+### PII vs Derived Data — Formal Definition
+
+| Category | Definition | Examples |
+|---|---|---|
+| **PII** | Any value that could identify or directly characterize a person's finances at a specific point in time | `income: 145000`, `savings: 238500`, `account: 4521...` |
+| **Derived / Abstracted** | A label or range computed from a raw value — cannot be reversed to the original | `income_range: "UPPER_MIDDLE"`, `savings_level: "GOOD"` |
+
+### BEFORE — Unsafe Redis Profile Schema
+
+```json
+{
+  "profile": {
+    "name": "Rohan",
+    "age": 35,
+    "income": 145000,
+    "savings": 238500,
+    "monthly_expenses": 4200,
+    "retirement_age": 60,
+    "risk_tolerance": "medium",
+    "goals": ["retire at 60"]
+  }
+}
+```
+
+**Problems**: `income`, `savings`, and `monthly_expenses` are exact figures. If Redis is compromised, exact financial data is exposed.
+
+### AFTER — Safe Redis Profile Schema
+
+```json
+{
+  "profile": {
+    "name": "Rohan",
+    "age": 35,
+    "income_range": "UPPER_MIDDLE",
+    "savings_level": "GOOD",
+    "expense_level": "MODERATE",
+    "retirement_age": 60,
+    "risk_tolerance": "medium",
+    "goals": ["retire at 60"]
+  }
+}
+```
+
+**Raw values stay in LLM context only** — they are used during the current request to run agents, then discarded. They are never written to Redis, Markdown, or Vector DB.
+
+### Required Code Change — `sanitizeProfile()` Utility
+
+A `sanitizeProfile()` function must be applied in `chat.route.js` and `upload.route.js` before calling `redisMemory.updateSession()`:
+
+```javascript
+// utils/pii.sanitizer.js  (to be added)
+export function sanitizeProfile(rawProfile) {
+  return {
+    name:           rawProfile.name          || 'User',
+    age:            rawProfile.age           || 0,      // age is not PII in this context
+    income_range:   incomeToRange(rawProfile.income || 0),
+    savings_level:  savingsLevel(rawProfile.savings || 0),
+    expense_level:  expenseLevel(rawProfile.monthly_expenses || 0, rawProfile.income || 0),
+    retirement_age: rawProfile.retirement_age || 65,
+    risk_tolerance: rawProfile.risk_tolerance || 'medium',
+    goals:          rawProfile.goals          || [],
+  };
+}
+```
+
+Then in the route, before saving:
+```javascript
+// chat.route.js / upload.route.js
+if (profile) {
+  const safeProfile = sanitizeProfile(profile);  // strip raw numbers
+  await redisMemory.updateSession(sessionId, { profile: safeProfile });
+  eventEmitter.emitProfileUpdated(sessionId, safeProfile);
+}
+```
+
+> **Note**: This change requires updating the profile component in Angular to display range labels instead of raw numbers. The simulation agent must also accept range labels or fall back to a numeric estimate derived from the range midpoint.
+
+### Sanitization Thresholds (Reference)
+
+| Raw Field | Sanitizer Function | Output Labels |
+|---|---|---|
+| `income` | `incomeToRange(income)` | LOW / LOWER_MIDDLE / MIDDLE / UPPER_MIDDLE / HIGH / VERY_HIGH |
+| `savings` | `savingsLevel(savings)` | VERY_LOW / LOW / MODERATE / GOOD / HIGH / VERY_HIGH |
+| `monthly_expenses` | `expenseLevel(expenses, income)` | VERY_LOW / LOW / MODERATE / HIGH / VERY_HIGH |
+
+---
+
+## 16. Session Atomicity & Concurrency
+
+### Current Behavior — Non-Atomic Writes
+
+The current `updateSession()` in `redis.memory.js` performs a **non-atomic read-modify-write**:
+
+```javascript
+async updateSession(sessionId, partial) {
+  const existing = await this.getSession(sessionId);   // READ
+  const merged = { ...existing, ...partial };           // MODIFY (in-memory)
+  await this.saveSession(sessionId, merged);            // WRITE
+}
+```
+
+**Race condition scenario**:
+```
+Request A reads session  →  { profile: null, simulation: null }
+Request B reads session  →  { profile: null, simulation: null }
+Request A writes         →  { profile: {...}, simulation: null }
+Request B writes         →  { profile: null,  simulation: {...} }   ← A's profile is LOST
+```
+
+This can happen if a user sends two messages in rapid succession, or if the chat and upload routes run concurrently for the same session.
+
+### What Happens if an Agent Fails Mid-Write
+
+With the current `withFallback()` design:
+1. Each agent returns an empty patch `{}` on failure
+2. Routes only call `updateSession()` if the value is non-null
+3. So a failing agent simply produces no write — it does not corrupt existing data
+4. Risk is data incompleteness, not corruption
+
+### Fix Option 1 — Optimistic Locking with Version Field
+
+```javascript
+async updateSessionAtomic(sessionId, partial) {
+  const MAX_RETRIES = 3;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    const existing = await this.getSession(sessionId) || { _version: 0 };
+    const expectedVersion = existing._version || 0;
+
+    const merged = {
+      ...existing,
+      ...partial,
+      _version: expectedVersion + 1,
+      updatedAt: new Date().toISOString(),
+    };
+
+    // Only write if version hasn't changed (WATCH + MULTI/EXEC equivalent via Lua)
+    const written = await this._compareAndSet(sessionId, merged, expectedVersion);
+    if (written) return merged;
+
+    // Version mismatch — another request updated session, retry
+    await new Promise(r => setTimeout(r, 10 * (attempt + 1)));
+  }
+  throw new Error(`Session ${sessionId} update conflict after ${MAX_RETRIES} retries`);
+}
+
+// Lua script: atomic compare-and-set
+async _compareAndSet(sessionId, newValue, expectedVersion) {
+  const script = `
+    local current = redis.call('GET', KEYS[1])
+    if current == false then
+      redis.call('SETEX', KEYS[1], ARGV[2], ARGV[1])
+      return 1
+    end
+    local data = cjson.decode(current)
+    if (data._version or 0) == tonumber(ARGV[3]) then
+      redis.call('SETEX', KEYS[1], ARGV[2], ARGV[1])
+      return 1
+    end
+    return 0
+  `;
+  const result = await this.client.eval(
+    script, 1,
+    `session:${sessionId}`,
+    JSON.stringify(newValue),
+    this.ttl,
+    String(expectedVersion),
+  );
+  return result === 1;
+}
+```
+
+### Fix Option 2 — Per-Session Mutex (Simpler, No Lua Required)
+
+```javascript
+// In-memory mutex map (works for single-process; use Redis SET NX for multi-process)
+const sessionLocks = new Map();
+
+async updateSessionSafe(sessionId, partial) {
+  // Wait for any existing lock on this session
+  while (sessionLocks.has(sessionId)) {
+    await sessionLocks.get(sessionId);
+  }
+
+  let resolve;
+  const lock = new Promise(r => { resolve = r; });
+  sessionLocks.set(sessionId, lock);
+
+  try {
+    const existing = await this.getSession(sessionId) || {};
+    const merged = { ...existing, ...partial, updatedAt: new Date().toISOString() };
+    await this.saveSession(sessionId, merged);
+    return merged;
+  } finally {
+    sessionLocks.delete(sessionId);
+    resolve();
+  }
+}
+```
+
+### Practical Impact Assessment
+
+| Scenario | Risk without fix | Risk with mutex |
+|---|---|---|
+| Two rapid chat messages | Profile from first message overwritten by second | Serialized — both writes succeed in order |
+| Chat + upload simultaneously | One write lost | Serialized — both complete |
+| Agent fails mid-pipeline | No write (safe) | No change — already safe |
+| Backend restarted | In-memory mutex lost | No stale locks — clean state |
+
+> **Current status**: The mutex is not yet implemented. For a single-user POC with sequential requests, the race condition is unlikely to trigger. For production multi-user usage, `updateSessionSafe()` must replace `updateSession()`.
+
+---
+
+## 17. Vector DB Isolation Guarantees
+
+### How sessionId is Enforced on WRITE
+
+Every document stored in ChromaDB includes `sessionId` in its metadata:
+
+```javascript
+// vector.store.js — storeSessionSnapshot()
+await this.add(id, markdownContent, { sessionId, type: 'session_snapshot' });
+
+// vector.store.js — add()
+await this.collection.add({
+  ids:        [id],
+  embeddings: [vector],
+  documents:  [text],
+  metadatas:  [{ sessionId, type: 'session_snapshot' }],  // ← sessionId always present
+});
+```
+
+**Enforcement**: `sessionId` is a required parameter in `storeSessionSnapshot()`. There is no public method to store without a sessionId.
+
+### How sessionId is Enforced on READ
+
+Every query passes `where: { sessionId }` when a sessionId is available:
+
+```javascript
+// vector.store.js — search()
+if (sessionId) queryParams.where = { sessionId };
+const results = await this.collection.query(queryParams);
+```
+
+**The gap**: `sessionId` is optional — `search(query, null)` returns results **across all sessions**. This is the cross-session data leak risk.
+
+### Failure Scenario — Filter Missed
+
+```javascript
+// UNSAFE: called without sessionId
+const ragContext = await vectorStore.searchAsContext(message);
+// Returns documents from ALL sessions — user A can see user B's financial context
+```
+
+This would happen if a developer adds a new route and forgets to pass `sessionId`.
+
+### Mitigation — Strict Wrapper Enforcing sessionId
+
+Add a `searchForSession()` method that makes `sessionId` mandatory:
+
+```javascript
+// vector.store.js (proposed addition)
+async searchForSession(query, sessionId) {
+  if (!sessionId) throw new Error('VectorStore.searchForSession: sessionId is required');
+  return this.searchAsContext(query, sessionId);
+}
+```
+
+Replace all calls in routes with `searchForSession()` instead of `searchAsContext()`:
+```javascript
+// chat.route.js
+const ragContext = await vectorStore.searchForSession(message, sessionId);  // throws if no sessionId
+
+// upload.route.js
+const ragContext = await vectorStore.searchForSession(`financial document ${fileName}`, sessionId);
+```
+
+### Collection Strategy
+
+Currently all sessions share **one collection** (`financial_memory` / `financial_planning`), isolated by metadata filter. An alternative is **per-session collections**:
+
+| Strategy | Current | Alternative |
+|---|---|---|
+| **Isolation mechanism** | `where: { sessionId }` metadata filter | Separate collection per session |
+| **Risk of cross-contamination** | Developer forgets filter | Zero — separate namespace |
+| **Cleanup** | Must delete by filter | `client.deleteCollection(sessionId)` |
+| **Scale** | One collection, N sessions | N collections |
+| **ChromaDB limit** | Not a concern for POC | Collections have overhead at scale |
+
+> **Recommendation for production**: Per-session collections eliminate the filter-miss risk entirely. For current POC scale, the metadata filter with the mandatory wrapper is sufficient.
+
+### In-Memory Fallback Isolation
+
+The fallback array applies the same filter:
+```javascript
+const pool = sessionId
+  ? this._fallbackDocs.filter((d) => d.metadata?.sessionId === sessionId)
+  : this._fallbackDocs;
+```
+
+Same gap: if `sessionId` is null, all docs are returned. The `searchForSession()` wrapper fixes this path too.
+
+---
+
+## 18. Planner Decision Deep Dive
+
+### Full Decision Flow
+
+```
+User message
+    │
+    ▼
+Step 1 — Context injection
+    │   profileExists = session.profile ? "yes" : "no"
+    │   simulationExists = session.simulation ? "yes" : "no"
+    │   sessionContext = last N conversation turns
+    │
+    ▼
+Step 2 — LLM reasoning (non-deterministic)
+    │   Prompt rules applied by LLM:
+    │   • "Is this first message?" → include profile
+    │   • "Did user mention retirement/savings goals?" → include simulation
+    │   • "Did user ask about investments?" → include portfolio (needs simulation)
+    │   • "Did user mention taxes?" → include tax (needs taxInsights)
+    │   • "Did user mention spending/budget?" → include cashflow
+    │   • "Is intent clear?" → set confidence = high|medium|low
+    │
+    ▼
+Step 3 — Guardrails (deterministic, in PlannerAgent code)
+    │   • explanation missing → append it
+    │   • portfolio present, simulation absent → inject simulation before portfolio
+    │   • risk present, portfolio absent → inject portfolio → simulation
+    │
+    ▼
+Step 4 — Output: final plan object
+```
+
+### Mandatory Agent Rules (Hard-Coded in `planner.agent.js`)
+
+These rules run **after** the LLM output — the LLM cannot override them:
+
+```javascript
+// 1. Explanation is always the last agent
+if (!agents.includes('explanation')) agents.push('explanation');
+
+// 2. Portfolio requires simulation (portfolio allocation needs projection data)
+if (agents.includes('portfolio') && !agents.includes('simulation')) {
+  agents.splice(agents.indexOf('portfolio'), 0, 'simulation');
+}
+
+// 3. Risk requires portfolio (risk scoring needs allocation data)
+if (agents.includes('risk') && !agents.includes('portfolio')) {
+  const riskIdx = agents.indexOf('risk');
+  if (!agents.includes('simulation')) agents.splice(riskIdx, 0, 'simulation');
+  agents.splice(agents.indexOf('risk'), 0, 'portfolio');
+}
+```
+
+### Optional Agent Logic
+
+These agents are included only when the LLM decides context warrants them AND the required data exists:
+
+| Agent | LLM condition | Code guard in graph node |
+|---|---|---|
+| `tax` | Message mentions taxes, deductions, or optimization | `if (!taxInsights) return {}` — skips if no insights loaded |
+| `cashflow` | Message mentions spending, budget, monthly cash | `if (!cashflowInsights) return {}` — skips if no insights loaded |
+| `portfolio` | Message mentions investments or allocation | Requires simulation to have run first |
+| `risk` | Message mentions risk, volatility, or market exposure | Requires portfolio to have run first |
+
+### Missing Data Handling
+
+The planner returns a `missing_data[]` array listing document types that would improve the analysis. This is surfaced to the user in the API response `meta.missing_data`:
+
+```json
+{
+  "meta": {
+    "missing_data": ["tax_document", "bank_statement"],
+    "confidence": "medium",
+    "decision_rationale": "Profile extracted from chat only — uploading a bank statement would improve cashflow analysis."
+  }
+}
+```
+
+**The system does not block on missing data.** It proceeds with whatever is available and communicates gaps to the user.
+
+### Full Decision Example
+
+**User message**: `"What's my retirement outlook and should I be worried about taxes?"`
+
+```
+Step 1 — Context:
+  profileExists = "yes"  (prior session)
+  simulationExists = "yes"
+  sessionContext = "User: Can I retire at 55? Assistant: Based on your profile..."
+
+Step 2 — LLM reasoning:
+  "retirement outlook" → include simulation
+  "worried about taxes" → include tax
+  profile already exists → omit profile (no new personal info shared)
+  taxInsights exist in session (user uploaded W2 last week) → tax agent can run
+
+Step 3 — Guardrails:
+  simulation already present → OK
+  tax present → no dependency issue (tax only needs taxInsights)
+  explanation missing → append
+
+Step 4 — Final plan:
+  {
+    intent: "Retirement projection + tax efficiency review",
+    required_agents: ["simulation", "tax", "explanation"],
+    optional_agents: ["portfolio"],
+    missing_data: [],
+    confidence: "high",
+    decision_rationale: "Simulation for retirement outlook; tax included because user explicitly asked and taxInsights are available from prior upload.",
+    agents: ["simulation", "tax", "explanation"],
+    ui: [simulation_chart, tax_panel, explanation_panel]
+  }
+```
+
+---
+
+## 19. Data Lifecycle & Retention
+
+### Lifecycle Diagram
+
+```
+Document Upload / Chat Message
+    │
+    ▼
+┌──────────────────────────────────────────────┐
+│  IN-MEMORY (transient — current request only) │
+│  • Raw document text                          │
+│  • LLM raw_values (grossIncome, etc.)         │
+│  • LangGraph state object                     │
+│  Lifetime: single HTTP request (~30-60s)      │
+└──────────────────────────────────────────────┘
+    │ sanitized signals only
+    ▼
+┌──────────────────────────────────────────────┐
+│  REDIS  session:{sessionId}                  │
+│  Lifetime: TTL (default 1 hour)              │
+│  Extended: on every updateSession() call     │
+│  Cleared: TTL expiry OR DELETE /api/session  │
+└──────────────────────────────────────────────┘
+    │ abstracted summaries only
+    ▼
+┌──────────────────────────────────────────────┐
+│  MARKDOWN  data/sessions/{sessionId}.md       │
+│  Lifetime: indefinite (no auto-cleanup)       │
+│  Cleared: manual deletion only               │
+│  Risk: grows unbounded; contains abstractions │
+└──────────────────────────────────────────────┘
+    │ anonymized summaries only
+    ▼
+┌──────────────────────────────────────────────┐
+│  VECTOR DB  ChromaDB collection              │
+│  Lifetime: indefinite (no auto-cleanup)      │
+│  Cleared: manual DELETE by sessionId filter  │
+│  Risk: grows unbounded; contains summaries   │
+└──────────────────────────────────────────────┘
+```
+
+### Retention Policy (Current vs Recommended)
+
+| Store | Current | Recommended for Production |
+|---|---|---|
+| Redis | 1-hour TTL | Configurable per tier; extend on activity; hard cap at 30 days |
+| Markdown files | Never deleted | Delete when Redis key expires (use Redis keyspace notifications) |
+| Vector embeddings | Never deleted | Delete when Redis key expires |
+| In-memory (request) | GC'd at request end | No change needed |
+
+### User-Triggered Delete Flow
+
+When a user triggers session reset (frontend "Reset" button or `DELETE /api/session/:id`):
+
+```
+1. DELETE /api/session/:sessionId
+       │
+       ├─→ redisMemory.deleteSession(sessionId)
+       │     → redis DEL session:{sessionId}
+       │
+       ├─→ Delete markdown file
+       │     → fs.unlinkSync(`data/sessions/${sessionId}.md`)
+       │
+       └─→ Delete vector embeddings
+             → collection.delete({ where: { sessionId } })
+```
+
+> **Current status**: The backend `DELETE /api/session/:sessionId` endpoint exists but only deletes the Redis key. Markdown and vector cleanup are **not implemented**. This is a gap for production use.
+
+### Redis Keyspace Notification Approach (Recommended)
+
+Configure Redis to emit keyspace events on key expiry, then subscribe in the backend to cascade cleanup:
+
+```javascript
+// index.js — subscribe to Redis expiry events
+redisClient.subscribe('__keyevent@0__:expired', (key) => {
+  if (key.startsWith('session:')) {
+    const sessionId = key.replace('session:', '');
+    // Cascade cleanup
+    fs.unlink(`data/sessions/${sessionId}.md`, () => {});
+    vectorStore.collection?.delete({ where: { sessionId } }).catch(() => {});
+    log.info(`Session ${sessionId} expired — markdown + vector cleanup triggered`);
+  }
+});
+```
+
+---
+
+## 20. Trust Boundaries
+
+### Where Raw Financial Data is Allowed
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  ALLOWED ZONE — Raw data exists here temporarily                  │
+│                                                                    │
+│  1. multer memoryStorage buffer                                    │
+│     (req.file.buffer — raw document bytes)                        │
+│                                                                    │
+│  2. documentText variable in upload.route.js                      │
+│     (buffer.toString('utf-8') — raw text, single request scope)  │
+│                                                                    │
+│  3. LLM prompt sent to Ollama/OpenAI                              │
+│     (documentText included in prompt — leaves process boundary)  │
+│                                                                    │
+│  4. LLM raw_values in DocumentIngestionAgent                      │
+│     (result.raw_values — grossIncome, SSN patterns — in-memory)  │
+│                                                                    │
+│  5. profile agent output (profile.income, profile.savings)        │
+│     (in graph state — used for simulation, NOT written to Redis)  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Where Raw Financial Data is Strictly Forbidden
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  FORBIDDEN ZONE — Raw data must never appear here                 │
+│                                                                    │
+│  ✗  Redis session store                                           │
+│     → Only range labels and abstracted agent outputs              │
+│                                                                    │
+│  ✗  Markdown memory files (data/sessions/)                       │
+│     → Only labels: "Income Range: UPPER_MIDDLE"                   │
+│                                                                    │
+│  ✗  ChromaDB vector store                                        │
+│     → Only anonymized summaries; no amounts, no account numbers   │
+│                                                                    │
+│  ✗  Application logs                                              │
+│     → redactDocument() must be applied before logging any text   │
+│                                                                    │
+│  ✗  HTTP response body                                            │
+│     → data.profile must contain sanitized fields only            │
+│                                                                    │
+│  ✗  WebSocket events                                              │
+│     → Events emit sanitized objects only                          │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Enforcement Strategy
+
+| Boundary | Current enforcement | Gap |
+|---|---|---|
+| multer → disk | `memoryStorage()` — no disk write | None |
+| raw_values → Redis | `sanitizeTaxInsights()` / `sanitizeCashflowInsights()` called before any persist | Profile agent raw numbers still written to Redis (see Section 15) |
+| documentText → logs | `redactDocument()` exists but not called in logging paths | Not enforced on debug logs |
+| profile → Redis | No `sanitizeProfile()` applied before save | **Gap — must be fixed** |
+| vector store | Anonymized summaries only | Content depends on what markdown is passed — abstraction maintained if markdown is correct |
+
+### Trust Boundary Enforcement Point Map
+
+```
+Upload request
+    │
+    ├─→ [BOUNDARY 1] multer memoryStorage
+    │     Raw bytes contained — no disk write
+    │
+    ├─→ [BOUNDARY 2] DocumentIngestionAgent
+    │     raw_values extracted → sanitized → raw_values discarded
+    │     ENFORCED by: sanitizeTaxInsights() / sanitizeCashflowInsights()
+    │
+    ├─→ [BOUNDARY 3] Profile sanitizer (GAP — not yet applied)
+    │     profile.income/savings/monthly_expenses → must be range labels
+    │     REQUIRED: sanitizeProfile() before updateSession()
+    │
+    └─→ [BOUNDARY 4] Storage writes
+          Redis: sanitized objects only
+          Markdown: MarkdownMemory.write() formats to labels
+          Vector: anonymized summary strings
+```
+
+---
+
+## 21. Concurrency & Event Ordering
+
+### Are Agents Sequential or Parallel?
+
+**Strictly sequential.** LangGraph `StateGraph` executes one node at a time. Each node must complete before the routing function runs and the next node starts. There is no parallel agent execution.
+
+```
+node_planner STARTS
+node_planner ENDS
+    → routing function runs
+node_profile STARTS
+node_profile ENDS
+    → routing function runs
+node_simulation STARTS
+... and so on
+```
+
+**Why sequential?** Each agent depends on the previous agent's output. `portfolio` needs `simulation` results. `risk` needs `portfolio` results. Parallel execution would require agents to run on different inputs, which doesn't fit the data dependency chain.
+
+### Concurrency at the Request Level
+
+Multiple users (or the same user sending rapid messages) create **separate graph invocations** that run concurrently at the Node.js process level:
+
+```
+User A request → financialGraph.invoke(stateA) ─────────────────→ done
+User B request → financialGraph.invoke(stateB) ──────────────→ done
+User A 2nd msg → financialGraph.invoke(stateA2) ───────────────────→ done
+```
+
+Each invocation has its own isolated state object — there is no shared mutable state in the graph itself. The only shared resource is Redis, where the session atomicity issue described in Section 16 applies.
+
+### WebSocket Event Ordering Guarantees
+
+Events are emitted in the order agents complete, which is deterministic:
+
+```
+AGENT_STARTED:planner
+PLANNER_DECIDED
+AGENT_COMPLETED:planner
+AGENT_STARTED:profile
+PROFILE_UPDATED         ← emitted after Redis write succeeds
+AGENT_COMPLETED:profile
+AGENT_STARTED:simulation
+SIMULATION_UPDATED
+AGENT_COMPLETED:simulation
+...
+EXPLANATION_READY
+```
+
+**Ordering guarantees**:
+
+| Guarantee | Mechanism |
+|---|---|
+| Events for a session arrive in agent-completion order | Sequential graph execution — only one agent running at a time |
+| `PROFILE_UPDATED` fires after Redis write | `emitProfileUpdated()` called after `updateSession()` resolves |
+| Events from different sessions do not interleave incorrectly | Each WS connection filters by `sessionId` |
+
+**No guarantee**:
+
+| Non-guarantee | Reason |
+|---|---|
+| Event delivery order on the network | TCP is ordered per-connection, but the WS framework could buffer/reorder |
+| Events arrive before HTTP response | WS events are fire-and-forget; HTTP response waits for full pipeline |
+
+### What Happens if Two Requests Hit the Same Session Simultaneously
+
+```
+Timeline:
+  T=0ms  Request A (chat: "Can I retire?") → graph starts
+  T=50ms Request B (upload: W2.txt)        → graph starts (separate invocation)
+  T=8s   Request A profile node done       → updateSession({ profile })
+  T=9s   Request B profile node done       → updateSession({ profile })  ← may overwrite A's profile
+  T=12s  Request A simulation done         → updateSession({ simulation })
+  T=15s  Request B tax node done           → updateSession({ tax })
+  T=20s  Both complete — final Redis state depends on write order
+```
+
+**Result**: Non-deterministic final state. The last write wins on each key. As described in Section 16, a per-session mutex or optimistic locking is required to prevent this.
+
+### Summary Table
+
+| Property | Value |
+|---|---|
+| Agents run in parallel? | No — strictly sequential per request |
+| Requests run in parallel? | Yes — Node.js handles concurrent requests |
+| Shared state between requests? | Only Redis (race condition exists — see Section 16) |
+| WebSocket event order | Guaranteed per session (sequential agent completion) |
+| Graph state isolation | Complete — each invocation has its own state object |
 
 > **Note**: The HTTP response is still the primary data source for UI rendering. WebSocket events are currently wired for loading indicators. Connecting them to the `DynamicRendererComponent` for progressive rendering is the next architectural enhancement.
