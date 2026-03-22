@@ -72,33 +72,28 @@ Respond ONLY with valid JSON:
 `);
 
 // ── Simulation ────────────────────────────────────────────────────────────────
+// NOTE: All numbers are pre-calculated by financial.calculator.js (deterministic math).
+// The LLM only writes the summary text and milestone notes — it does NOT calculate anything.
 export const simulationPrompt = PromptTemplate.fromTemplate(`
-You are the Simulation Agent. Run a financial projection based on user profile.
+You are the Simulation Agent. The financial projection has already been calculated for you.
+Your ONLY job is to write a clear, human-friendly summary and add a short note to each milestone.
+DO NOT recalculate any numbers. Use the numbers exactly as provided.
 
-Current year: {currentYear}
+Pre-calculated projection:
+{projection}
 
-Profile:
+User profile:
 {profile}
-
-RAG context:
-{ragContext}
 
 User message: {message}
 
-Retirement year = {currentYear} + (retirement_age - age). Generate EXACTLY 3 milestones at roughly equal intervals.
+Write a 2-3 sentence summary addressing the user's question directly.
+Add a short milestone note (1 sentence) for each of the 3 milestones explaining what that savings amount means.
 
 Respond ONLY with valid JSON:
 {{
-  "can_retire_at_target": true,
-  "projected_savings_at_retirement": 0,
-  "monthly_shortfall_or_surplus": 0,
-  "years_of_runway": 0,
-  "milestones": [
-    {{"year": 2031, "savings": 0, "note": ""}},
-    {{"year": 2041, "savings": 0, "note": ""}},
-    {{"year": 2051, "savings": 0, "note": ""}}
-  ],
-  "summary": "..."
+  "summary": "2-3 sentence plain English summary addressing the user's question",
+  "milestone_notes": ["note for milestone 1", "note for milestone 2", "note for milestone 3"]
 }}
 `);
 
