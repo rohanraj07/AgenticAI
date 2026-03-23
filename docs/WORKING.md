@@ -1,114 +1,257 @@
 # WORKING — How to Verify Everything is Running
 
+---
+
 ## Quick Start
 
 ```bash
 # Terminal 1 — Backend
-cd backend && npm install && npm start
+cd backend && npm install && npm run dev
 
 # Terminal 2 — Frontend
-cd frontend && npm start
+cd frontend && npm install && npm start
 ```
 
 Open: http://localhost:4200
 
 ---
 
-## Demo Script (End-to-End)
+## What to expect in the logs
 
-### Step 1 — Base Chat
-Ask: **"Can I retire at 55?"**
+The backend now logs each phase of the hybrid pipeline. Here is the full log flow for a typical run.
 
-Expected backend logs:
+### Step 1 — Base Chat: "Can I retire at 55?"
+
 ```
 [Route]    POST /chat | session: <uuid>
-[LangGraph] ▶ node_planner START
-[LangGraph] ✔ node_planner DONE (1200ms) | intent: "Assess early retirement..." | agents: [profile, simulation, explanation]
+[Route]    session loaded | profile: false | docInsights: [none]
+[ReactiveEngine] seeded session=<uuid> from Redis
+
+[LangGraph] ▶ node_planner START | message: "Can I retire at 55?"
+[LangGraph] ✔ node_planner DONE (1200ms) | intent: "Retirement feasibility check" | agents: [profile, simulation, explanation]
+[LangGraph]   confidence: high
+
 [LangGraph] ▶ node_profile START
-[LangGraph] ✔ node_profile DONE (900ms) | name: User, age: 35, income: $80000
-[LangGraph] ▶ node_simulation START
-[LangGraph] ✔ node_simulation DONE (1100ms) | can_retire=false | projected=$320000 | runway=12yrs
+[LangGraph] ✔ node_profile DONE (900ms) | name=User age=35 risk=medium
+
+[LangGraph] ▶ node_simulation START | age=35, savings=$200000, retire_at=65
+[Agent]    SimulationAgent [1/2] deterministic projection
+[Agent]      Years to retirement: 30
+[Agent]      Monthly savings: $2,833/mo
+[Agent]      Annual contributions: $34,000/yr
+[Agent]      Projected savings: $4,347,122
+[Agent]      Required savings (25x rule): $1,050,000
+[Agent]      Can retire at target: true
+[Agent]      Monthly surplus: $10,990
+[Agent]    SimulationAgent [2/2] LLM narrative generation
+[LangGraph] ✔ node_simulation DONE (5200ms) | can_retire=true | projected=$4,347,122
+
 [LangGraph] ▶ node_explanation START
-[LangGraph] ✔ node_explanation DONE (800ms)
+[LangGraph] ✔ node_explanation DONE (2100ms) | 342 chars
+
+[Route]    → profile saved
+[Route]    → simulation saved | can_retire=true
+[ReactiveEngine] PROFILE_UPDATED → cascade=[simulation, portfolio, risk] session=<uuid>
+[ReactiveEngine] ✔ simulation recomputed (2ms)
+[ReactiveEngine] skip portfolio — prerequisite state missing
+[ReactiveEngine] skip risk — prerequisite state missing
 ```
 
 Expected UI panels: `profile_summary`, `simulation_chart`, `explanation_panel`
 
 ---
 
-### Step 2 — Upload Tax Document
+### Step 2 — Portfolio + Risk: "What should I invest in?"
+
+```
+[LangGraph] ✔ node_planner DONE | agents: [simulation, portfolio, risk, explanation]
+
+[LangGraph] ▶ node_simulation START | age=35, savings=$200000, retire_at=65
+[Agent]    SimulationAgent [1/2] deterministic projection
+[Agent]      Projected savings: $4,347,122
+[Agent]    SimulationAgent [2/2] LLM narrative generation
+[LangGraph] ✔ node_simulation DONE (4800ms)
+
+[LangGraph] ▶ node_portfolio START | risk_tolerance=medium
+[Agent]    PortfolioAgent [1/2] deterministic allocation
+[Agent]      Strategy:  balanced
+[Agent]      Equities:  60% | Glide: accumulation
+[Agent]      Return:    6.6% expected
+[Agent]      Rebalance: annually
+[Agent]    PortfolioAgent [2/2] LLM rationale generation
+[LangGraph] ✔ node_portfolio DONE (3100ms) | strategy=balanced | return=6.6%
+[LangGraph]   allocation: [Equities:60%, Bonds:30%, Real Estate:5%, Cash:5%]
+
+[LangGraph] ▶ node_risk START | strategy=balanced
+[Agent]    RiskAgent [1/2] deterministic scoring
+[Agent]      Score: 3/10 | Level: low
+[Agent]      Factors → equity: 2/3 | time: 0/3 | gap: 0/3
+[Agent]      Stress test → crash: $521,655 | inflation: $217,356
+[Agent]    RiskAgent [2/2] LLM risk narrative generation
+[LangGraph] ✔ node_risk DONE (2900ms) | score=3/10 | level=low
+
+[ReactiveEngine] SIMULATION_UPDATED → cascade=[portfolio, risk]
+[ReactiveEngine] ✔ portfolio recomputed (1ms)
+[ReactiveEngine] ✔ risk recomputed (1ms)
+```
+
+Expected UI panels: `simulation_chart`, `portfolio_view`, `risk_dashboard`, `explanation_panel`
+
+---
+
+### Step 3 — Upload Tax Document
+
 Use sample: `backend/data/sample-tax-document.txt`
 
-Expected backend logs:
 ```
 [Route]    POST /upload | session: <uuid> | file: "sample-tax-document.txt" (3142 bytes)
 [Route]    ⚠️  TRUST-BY-DESIGN: File received in-memory. Will NOT be written to disk.
-[Agent]    DocumentIngestionAgent: processing "sample-tax-document.txt" (3142 chars of raw text)
-[Agent]    ⚠️  Raw document text will NOT be stored — extracting abstractions only
+[Agent]    DocumentIngestionAgent: processing "sample-tax-document.txt" (3142 chars)
+[Agent]    ⚠️  Raw document text will NOT be stored
 [Agent]    Classification: tax_document (confidence: high)
-[Agent]    Primary insight: "Married couple in upper-middle income bracket with 32% marginal rate"
-[Agent]    Sanitizing raw values → abstractions (raw values will be discarded)...
-[Agent]    Tax abstractions: income_range=HIGH, bracket=32%, deductions=MODERATE
+[Agent]    Sanitizing raw_values → abstractions (raw values discarded after)...
+[Agent]    taxInsights: income_range=UPPER_MIDDLE, bracket=22%, deductions=MODERATE
 [Agent]    ✅ Raw values discarded — only abstracted signals returned
-[LangGraph] ▶ node_tax START | bracket: 32%, income: HIGH
-[LangGraph] ✔ node_tax DONE (1300ms) | efficiency: 7/10 | strategies: 4
+
+[LangGraph] ▶ node_planner SKIP — plan pre-seeded
+[LangGraph] ▶ node_profile START
+[LangGraph] ✔ node_profile DONE (880ms)
+
+[LangGraph] ▶ node_tax START | bracket: 22%, income: UPPER_MIDDLE
+[Agent]    TaxAgent [1/4] parseTaxSignals
+[Agent]    TaxAgent [2/4] analyzeDeductions | score=2/4 | gap=true
+[Agent]    TaxAgent [3/4] LLM chain
+[Agent]    TaxAgent [4/4] rankOptimizationStrategies
+[LangGraph] ✔ node_tax DONE (3100ms) | efficiency=6/10 | strategies=4
+
+[LangGraph] ▶ node_simulation START
+[Agent]    SimulationAgent [1/2] deterministic projection
+[Agent]      Projected savings: $4,347,122
+[LangGraph] ✔ node_simulation DONE (4200ms)
+
+[Route]    → profile saved
+[Route]    → simulation saved
+[Route]    → tax saved | efficiency=6/10
+[ReactiveEngine] TAX_UPDATED → cascade=[simulation] session=<uuid>
+[ReactiveEngine] ✔ simulation recomputed (3ms)
 ```
 
-Expected UI panels: `tax_panel`, `simulation_chart`, `explanation_panel`
+Expected UI panels: `profile_summary`, `tax_panel`, `simulation_chart`, `explanation_panel`
 
-**Key demo point:** Open `backend/data/sessions/<sessionId>.md` — you'll see:
+**Key demo point:** Open `backend/data/sessions/<sessionId>.md`:
 ```markdown
 ## Tax Intelligence (Abstracted Signals)
 > 🔒 Raw tax document NOT stored. Only derived signals below.
-- **Income Range**: HIGH
-- **Tax Bracket**: 32%
-- **Effective Rate**: 10.6%
-- **Deductions Level**: MODERATE
+- Income Range: UPPER_MIDDLE
+- Tax Bracket: 22%
+- Effective Rate: 18.5%
+- Deductions Level: MODERATE
 ```
-No SSN, no exact amounts — only abstracted signals.
+No SSN. No exact income. No account numbers. Only abstracted signals.
 
 ---
 
-### Step 3 — Upload Bank Statement
+### Step 4 — Upload Bank Statement
+
 Use sample: `backend/data/sample-bank-statement.txt`
 
-Expected logs:
 ```
-[Agent]    CashflowAgent: analyzing spending patterns from abstracted signals
-[Agent]    Signals: income=HIGH, spending=MODERATE, savings=GOOD
-[LangGraph] ✔ node_cashflow DONE | budget: good | recommendations: 3
+[Agent]    Classification: bank_statement (confidence: high)
+[Agent]    cashflowInsights: income_range=MIDDLE, spending=ELEVATED, savings=GOOD
+
+[LangGraph] ▶ node_cashflow START | spending=ELEVATED savings_rate=GOOD
+[Agent]    CashflowAgent [1/4] parseCashflowSignals
+[Agent]    CashflowAgent [2/4] classifySpendingRisk | risk=medium requires_intervention=false
+[Agent]    CashflowAgent [3/4] LLM chain
+[Agent]    CashflowAgent [4/4] deriveSavingsInsight | score=3/5 potential=MODERATE
+[LangGraph] ✔ node_cashflow DONE (2800ms) | budget=good | recs=3
+
+[ReactiveEngine] CASHFLOW_UPDATED → cascade=[simulation]
+[ReactiveEngine] ✔ simulation recomputed (2ms)
 ```
 
-Expected UI panels: `cashflow_panel`, `explanation_panel`
+Expected UI panels: `profile_summary`, `cashflow_panel`, `simulation_chart`, `explanation_panel`
 
 ---
 
-### Step 4 — Follow-up Chat
-Ask: **"What should I improve to retire earlier?"**
+### Step 5 — Follow-up Chat: "What should I improve to retire earlier?"
 
-System now has: profile + tax insights + cashflow signals + simulation  
-Planner sees enriched context → triggers relevant agents → produces richer answer.
+System now has: profile + tax insights + cashflow signals + simulation
+
+```
+[Route]    session loaded | profile: true | docInsights: [tax, cashflow]
+[ReactiveEngine] seeded session=<uuid> from Redis
+[LangGraph] ✔ node_planner DONE | agents: [cashflow, simulation, explanation]
+[LangGraph] ✔ node_cashflow DONE — re-runs with persisted cashflowInsights
+```
+
+Planner enriches response using all accumulated context. No re-upload needed.
+
+---
+
+## Verifying Deterministic Compute
+
+To confirm numbers come from math, not LLM:
+
+```bash
+# Check simulation inputs and outputs in the log
+grep "SimulationAgent \[1/2\]" backend/logs/  # or watch stdout
+
+# You should see:
+# Monthly savings: $2,833/mo   ← (80000/12) - 3500 = 3167 ← verify with calculator
+# Annual contributions: $34,000/yr
+# Projected savings: $4,347,122  ← FV formula, not LLM estimate
+```
+
+The numbers in the log are always the same for the same profile. The LLM only changes the *text* around them.
+
+---
+
+## Verifying Reactive Cascade
+
+To confirm ReactiveEngine fires on profile change:
+
+```bash
+# Watch for ReactiveEngine log lines
+grep "ReactiveEngine" backend/logs/
+
+# After first message you should see:
+# [ReactiveEngine] seeded session=<uuid> from Redis
+# [ReactiveEngine] PROFILE_UPDATED → cascade=[simulation, portfolio, risk]
+# [ReactiveEngine] ✔ simulation recomputed (2ms)
+```
+
+Notice the ReactiveEngine recomputes in ~2ms (pure math) vs 4800ms for the full LLM simulation node.
 
 ---
 
 ## Verifying PII Safety
 
-### What should NOT appear anywhere in storage:
-- `$148,500` (exact income)
-- `XXX-XX-1234` (SSN pattern)
-- `XXXXXX-7892` (account number)
-- Any dollar amounts from bank statement
+### What should NOT appear anywhere:
 
-### What SHOULD appear in storage:
-- Redis session: `{ taxInsights: { income_range: "HIGH", tax_bracket: "32%", ... } }`
-- Markdown: `income_range: HIGH`, `spending_level: MODERATE`
-- ChromaDB: `"User in HIGH income bracket, 32% tax bracket, MODERATE deductions"`
-
-### Check session file:
 ```bash
-cat backend/data/sessions/<sessionId>.md
+# Check Redis
+redis-cli GET "session:<uuid>" | python3 -m json.tool | grep -E "148500|SSN|account"
+# → should return nothing
+
+# Check Markdown memory file
+cat backend/data/sessions/<uuid>.md | grep -E "148500|SSN"
+# → should return nothing
 ```
-Should show only abstract labels, not numbers.
+
+### What SHOULD appear:
+
+```bash
+# Redis should contain abstracted signals
+redis-cli GET "session:<uuid>" | python3 -m json.tool | grep income_range
+# → "income_range": "UPPER_MIDDLE"
+
+# Markdown file should show abstracted labels
+cat backend/data/sessions/<uuid>.md
+# → Income Range: UPPER_MIDDLE
+# → Tax Bracket: 22%
+# → Spending Level: ELEVATED
+```
 
 ---
 
@@ -121,45 +264,50 @@ Should show only abstract labels, not numbers.
 | Yellow | `[LangGraph]` | Graph node execution |
 | Blue | `[VectorDB]` | ChromaDB operations |
 | Cyan | `[Redis]` | Redis operations |
-| Gray | `[Warn]` | Degraded mode warning |
-| Red | `[Error]` | Error |
+| White | `[ReactiveEngine]` | Reactive cascade execution |
+| Gray | `[Warn]` | Degraded mode / fallback |
+| Red | `[Error]` | Error with stack trace |
 
 ---
 
-## Service Status Indicators (Header Dots)
+## Service Status
 
 | Color | Meaning |
 |-------|---------|
-| 🟢 Green | Service running, connected |
-| 🟡 Yellow | Fallback mode (in-memory) |
+| 🟢 Green | Service running and connected |
+| 🟡 Yellow | Fallback mode active (in-memory) |
 | 🔴 Red | Unavailable |
 
-Fallback mode: system still works — Redis → in-memory Map, ChromaDB → keyword search.
+Fallback mode: system fully functional — Redis → in-memory Map, ChromaDB → keyword search.
 
 ---
 
-## What Each Memory Layer Stores
+## What Each Layer Stores After a Full Session
 
-After a full demo session, you should see:
-
-**Redis key:** `session:<sessionId>`
+**Redis key** `session:<sessionId>`:
 ```json
 {
-  "profile": { "age": 38, "risk_tolerance": "medium", ... },
-  "simulation": { "can_retire_at_target": false, ... },
-  "tax": { "tax_efficiency_score": 7, "tax_bracket": "32%", ... },
-  "cashflow": { "budget_health": "good", "savings_rate_label": "GOOD", ... }
+  "profile":    { "age": 38, "income": 85000, "risk_tolerance": "medium", ... },
+  "simulation": { "can_retire_at_target": true, "projected_savings_at_retirement": 4347122, ... },
+  "portfolio":  { "allocation": [...], "strategy": "balanced", "expected_annual_return_percent": 6.6 },
+  "risk":       { "overall_risk_score": 3, "risk_level": "low", "stress_test": {...} },
+  "tax":        { "tax_efficiency_score": 6, "tax_bracket": "22%", ... },
+  "cashflow":   { "budget_health": "good", "savings_rate_label": "GOOD", ... },
+  "documentInsights": {
+    "tax":      { "income_range": "UPPER_MIDDLE", "tax_bracket": "22%", ... },
+    "cashflow": { "spending_level": "ELEVATED", "savings_rate": "GOOD", ... }
+  }
 }
 ```
 
-**Markdown file:** `backend/data/sessions/<uuid>.md`
-- Abstracted profile + simulation + tax + cashflow signals
+**Markdown file** `backend/data/sessions/<uuid>.md`:
+- Abstracted profile + simulation summary + tax + cashflow signals
 - PII policy header at top
-- Used as LLM context for future turns
+- Injected as LLM context on every subsequent request
 
-**ChromaDB / fallback:**
-- Anonymized insight summaries from each session turn
-- Enables RAG — past context enriches future responses
+**ChromaDB / fallback**:
+- Anonymized insight summaries (no raw values)
+- Semantic RAG retrieval enriches future responses
 
 ---
 
@@ -167,8 +315,10 @@ After a full demo session, you should see:
 
 | Symptom | Fix |
 |---------|-----|
-| `Cannot find module 'multer'` | Run `cd backend && npm install` |
-| LLM not responding | Check `OPENAI_API_KEY` in `.env` or run `ollama serve` |
-| Upload returns 400 | Check file is `.txt` or `.json`, field name is `document` |
-| Angular compile error | Run `cd frontend && npm install` |
+| `Cannot find module 'multer'` | `cd backend && npm install` |
+| `savings_gap is not defined` (startup error) | Template literal bug — use `{savings_gap}` not `${savings_gap}` in prompts.js |
+| LLM not responding | Check `GROQ_API_KEY` / `OPENAI_API_KEY` in `.env`, or run `ollama serve` |
+| Upload returns 400 | File must be `.txt`, `.json`, or `.csv`; field name must be `document` |
+| Angular compile error | `cd frontend && npm install` |
 | Port 3000 in use | `lsof -ti:3000 \| xargs kill` |
+| Simulation number seems wrong | Check that `financial.calculator.js` is being used — confirm log shows `[Agent] SimulationAgent [1/2] deterministic projection` |

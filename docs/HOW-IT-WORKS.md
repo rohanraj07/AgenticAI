@@ -1,234 +1,331 @@
-# How It Works — AI Financial Planner POC
+# How It Works — AI Financial Planner
 
-> **Positioning:** "A privacy-aware, intelligent financial advisor that evolves with user inputs while minimizing exposure of sensitive data."
-
----
-
-## Business Context
-
-Traditional financial planning tools are:
-- **Static**: You fill a form, get a fixed report
-- **Risky**: They store raw documents (tax returns, bank statements) creating PII liability
-- **Opaque**: You don't know which rules drove the recommendations
-
-This system is different:
-- **Conversational**: Chat-first, natural language in/out
-- **Adaptive**: UI evolves as more data arrives (A2UI)
-- **Multi-agent**: Specialized AI agents reason in parallel (A2A)  
-- **Trustworthy**: Raw documents are never stored — only abstracted insights
+> "A state-driven deterministic financial system with an AI interface."
 
 ---
 
-## The Three Core Patterns
+## The Core Idea
 
-### 1. A2UI — Agent-to-UI Dynamic Rendering
-
-**The AI composes the layout. The frontend never decides what to show.**
+Most AI financial tools are LLM-driven — the AI decides everything, including the numbers. This system is different:
 
 ```
-User: "I just uploaded my tax return"
-         │
-   PlannerAgent decides:
-   plan.ui = [
-     { type: "tax_panel" },
-     { type: "simulation_chart" },
-     { type: "explanation_panel" }
-   ]
-         │
-   Angular DynamicRendererComponent maps types → components
-   → Tax Intelligence panel renders
-   → Updated simulation renders
-   → Explanation renders
+WRONG approach (LLM-driven):
+  User: "Can I retire at 55?"
+  LLM: "Sure, with $500k you'll need $200k/yr, let me calculate... you need $5M."
+  ← LLM invented those numbers. They change every run. They may be wrong.
+
+THIS system (state-driven):
+  User: "Can I retire at 55?"
+  calculator.js: FV = $200k × (1.07)^20 + $34k × ((1.07)^20 - 1)/0.07 = $1,203,847
+  LLM: "Based on your projected $1,203,847 in savings..."
+  ← Numbers are deterministic. LLM only writes the sentence around them.
 ```
 
-The server tells the frontend which components to show. The frontend is a pure rendering layer. This means:
-- New panels can be added server-side without frontend deploys
-- The AI can compose novel layouts based on context
-- Different users see different UI depending on their data
-
-**Supported UI types today:**
-`profile_summary` | `simulation_chart` | `portfolio_view` | `risk_dashboard` | `tax_panel` | `cashflow_panel` | `explanation_panel`
+**The LLM is the interface. Math is the engine.**
 
 ---
 
-### 2. A2A — Agent-to-Agent Communication via LangGraph
+## The Three Patterns
 
-Agents share a state graph. Each agent reads upstream results and writes its own channel:
+### Pattern 1 — State-Driven Execution
 
-```
-LangGraph State Object:
-{
-  message:          "Can I retire at 55?",
-  plan:             { agents: [...], ui: [...] },    ← planner writes
-  profile:          { age: 38, risk: "medium" },     ← profile agent writes
-  taxInsights:      { income_range: "HIGH", ... },   ← pre-seeded from upload
-  tax:              { efficiency: 7, strategies: [] },← tax agent writes
-  simulation:       { can_retire: false, ... },       ← simulation agent writes
-  explanation:      "Based on your profile..."        ← explanation agent writes
-  trace:            [{ agent: "planner", latencyMs: 1200 }, ...]
+The system maintains a **single source of truth** per session:
+
+```javascript
+state = {
+  profile:    { age: 35, income: 80000, savings: 200000, ... },
+  simulation: { projected_savings: 1203847, can_retire: true, ... },
+  portfolio:  { allocation: [{Equities:60},{Bonds:30},...], strategy: "balanced", ... },
+  risk:       { overall_risk_score: 5, risk_level: "medium", ... },
+  tax:        { tax_efficiency_score: 7, optimization_strategies: [...], ... },
+  cashflow:   { budget_health: "good", recommendations: [...], ... }
 }
 ```
 
-The planner decides routing. If taxInsights are in state, it routes through `node_tax`. Each agent enriches the state for the next one.
+All agents read from this state. All agents write back to it. There is no other truth.
+
+This state lives in:
+- **StateManager** — in-process (ReactiveEngine uses this for instant access)
+- **Redis** — durable (persists across requests, TTL 1 hour)
+- **Markdown** — human-readable (injected into LLM prompts as context)
 
 ---
 
-### 3. Trust-by-Design — Privacy-Preserving Reasoning
+### Pattern 2 — Reactive Consistency
 
-**"Agents never operate on raw PII."**
-
-#### The Upload Flow (Key Demo Moment)
+When any upstream value changes, downstream agents **automatically recompute**. The system, not the LLM, guarantees this.
 
 ```
-User uploads: sample-tax-document.txt (contains "$148,500", "SSN: XXX-XX-1234")
-                        │
-                        ▼
-              Multer: memoryStorage
-              (file NEVER touches disk)
-                        │
-                        ▼
-         DocumentIngestionAgent receives text buffer
-                        │
-                   LLM reads raw text
-                   extracts raw_values temporarily:
-                   { grossIncome: 148500, effectiveTaxRate: 10.55 }
-                        │
-                   PII Sanitizer converts:
-                   grossIncome: 148500 → income_range: "HIGH"
-                   effectiveTaxRate: 10.55% → effective_rate: "10.6%"
-                   rawValues DISCARDED ← this is the key step
-                        │
-                        ▼
-              taxInsights = {
-                income_range:     "HIGH",      ← not "$148,500"
-                tax_bracket:      "32%",        ← marginal bracket
-                deductions_level: "MODERATE",   ← not "$32,600"
-                effective_rate:   "10.6%"
-              }
-                        │
-                        ▼
-              TaxAgent receives taxInsights (abstractions only)
-              Redis stores taxInsights (abstractions only)
-              Markdown stores taxInsights (abstractions only)
-              ChromaDB stores insight summary (no raw values)
+PROFILE_UPDATED fires (e.g. user shares new income)
+         │
+         ▼
+ReactiveEngine reads dependency map:
+  PROFILE_UPDATED → [simulation, portfolio, risk]
+         │
+         ├── recomputeSimulation(state)
+         │     calculateRetirementProjection(newProfile)
+         │     → new projected_savings, savings_gap, milestones
+         │     → StateManager updated, Redis updated, SIMULATION_UPDATED emitted
+         │
+         ├── recomputePortfolio(state)          ← sees updated simulation
+         │     computePortfolioAllocation(newProfile, newSimulation)
+         │     → new allocation, strategy, expected_return
+         │     → StateManager updated, Redis updated, PORTFOLIO_UPDATED emitted
+         │
+         └── recomputeRisk(state)               ← sees updated simulation + portfolio
+               computeRiskScore(newProfile, newPortfolio, newSimulation)
+               → new score, risk_level, stress_tests
+               → StateManager updated, Redis updated, RISK_UPDATED emitted
 ```
 
-**What gets stored in `backend/data/sessions/<id>.md`:**
-```markdown
-## Tax Intelligence (Abstracted Signals)
-> 🔒 Raw tax document NOT stored. Only derived signals below.
-- Income Range: HIGH
-- Tax Bracket: 32%
-- Effective Rate: 10.6%
-- Deductions Level: MODERATE
-```
+**Zero LLM calls. Zero manual triggers. Guaranteed consistency.**
 
-No SSN. No exact dollar amounts. No account numbers.
-
-#### Tiered Memory Safety
-
-| Layer | Stores | Never Stores |
-|-------|--------|-------------|
-| Redis | Sanitized profile, abstracted tax/cashflow signals | Raw documents, SSNs, exact amounts |
-| Markdown | Redacted summaries, range labels | PII, transaction data |
-| ChromaDB | Anonymized insight strings | Raw document embeddings |
-| Disk | Nothing from uploaded files | Raw uploaded files |
+This answers the critical question: "If income changes, can you guarantee simulation reruns?"
+**Yes — it is enforced by code in `reactive.engine.js`, not by any prompt.**
 
 ---
 
-## Agent Roles (Business Context)
+### Pattern 3 — A2UI (Agent-to-UI Dynamic Rendering)
 
-### PlannerAgent
-**Why needed:** Without a planner, you'd need hardcoded if/else rules for every user scenario. The planner uses LLM reasoning to interpret intent and compose responses dynamically.
+The server decides what the UI shows. The frontend is a pure rendering layer.
 
-### ProfileAgent
-**Why needed:** Users describe their situation in natural language. The profile agent extracts structured data (age, income, savings, risk tolerance) so downstream agents can reason numerically.
+```
+Planner LLM output:
+  plan.ui = [
+    { type: "profile_summary" },
+    { type: "simulation_chart" },
+    { type: "tax_panel" }
+  ]
+         │
+Angular DynamicRendererComponent:
+  maps type → Angular component
+  renders Tax panel + Simulation chart + Profile summary
+```
 
-### SimulationAgent
-**Why needed:** Core value of a financial planner — "Can I retire at 55?" needs math. The simulation projects savings growth over time, identifies gaps, and sets milestones.
-
-### PortfolioAgent
-**Why needed:** Asset allocation directly impacts whether someone reaches retirement goals. The portfolio agent recommends allocations based on risk tolerance and timeline.
-
-### RiskAgent
-**Why needed:** Every plan has downside scenarios. The risk agent stress-tests the portfolio (market crash, inflation spike) and quantifies exposure. This builds user trust.
-
-### DocumentIngestionAgent ← NEW
-**Why needed:** Users have real financial documents. Rather than ignoring them or storing them dangerously, this agent extracts only the signals needed for reasoning — making the system multi-modal AND privacy-preserving.
-
-### TaxAgent ← NEW
-**Why needed:** Tax optimization is often the highest-leverage financial planning tool. Many people in the 22-32% bracket have untapped opportunities (401k, HSA, Roth conversions). This agent provides personalized tax strategy based on abstracted signals.
-
-### CashflowAgent ← NEW
-**Why needed:** Retirement projections are only as good as your savings rate. If someone spends 85% of income, simulation says "shortfall" but doesn't explain why. Cashflow analysis surfaces the behavioral levers.
-
-### ExplanationAgent
-**Why needed:** LLM outputs from other agents are JSON. Users need plain English. The explanation agent synthesizes all agent outputs into a human-readable narrative that directly answers the user's question.
+Different users see different UI. New panels can be added without frontend deploys.
 
 ---
 
-## Reactive Event Flow
+## What Happens When You Ask "Can I retire at 55?"
 
-When a request comes in, the backend emits WebSocket events as agents complete:
+### Step 1 — Route Layer
+
+```
+POST /api/chat { message: "Can I retire at 55?", sessionId: null }
+  → New sessionId generated
+  → Load Redis session: {} (empty)
+  → reactiveEngine.seedFromSession(sessionId, {})
+  → RAG context: "" (no prior history)
+```
+
+### Step 2 — Planner (LLM: intent classification only)
+
+```
+Input: message + sessionContext + { profileExists: false, simulationExists: false }
+
+LLM output:
+{
+  intent: "Retirement feasibility check",
+  agents: ["profile", "simulation", "explanation"],
+  ui: [profile_summary, simulation_chart, explanation_panel],
+  confidence: "high"
+}
+```
+
+The planner classifies intent. It does not calculate anything.
+
+### Step 3 — Profile (LLM: entity extraction)
+
+```
+LLM extracts from natural language:
+{ age: 30, income: 80000, savings: 50000, retirement_age: 55, risk_tolerance: "medium" }
+```
+
+### Step 4 — Simulation (Math first, then LLM)
+
+```
+calculator.js (deterministic):
+  years_to_retirement = 55 - 30 = 25
+  monthly_savings = (80000/12) - 3500 = $3,167/mo
+  annual_savings = $38,000/yr
+
+  projected_savings = 50000 × (1.07)^25 + 38000 × ((1.07)^25 - 1)/0.07
+                    = $271,372 + $2,593,714 = $2,865,086  ← deterministic number
+
+  required_savings = 3500 × 12 × 25 = $1,050,000  (25x rule)
+  can_retire = true (projected > required)
+  monthly_surplus = ($2,865,086 × 4%) / 12 - $3,500 = $6,050/mo
+
+LLM (simulationChain):
+  Receives: pre-computed numbers
+  Returns: { summary: "You are well on track...", milestone_notes: [...] }
+           ← cannot change $2,865,086 or any other number
+```
+
+### Step 5 — Explanation (LLM: narrative synthesis)
+
+```
+Receives: profile + simulation (computed)
+Returns: "Based on your current income of $80k and $50k in savings,
+          retiring at 55 is achievable. Your projected $2.86M far exceeds
+          the $1.05M required..."
+```
+
+### Step 6 — Persist + Emit
+
+```
+Redis: { profile, simulation, messages }
+StateManager: { profile, simulation }
+PROFILE_UPDATED → ReactiveEngine (no recompute needed — simulation already ran)
+SIMULATION_UPDATED → WebSocket → Angular updates simulation chart
+```
+
+---
+
+## What Happens When You Upload a Tax Document
+
+### Step 1 — Document Ingestion (trust-by-design)
+
+```
+POST /api/upload (W2.txt in-memory buffer, never on disk)
+  │
+  ▼
+DocumentIngestionAgent:
+  LLM classifies: "tax_document" (high confidence)
+  LLM extracts raw_values (ephemeral, in-memory only):
+    { grossIncome: 145000, effectiveTaxRate: 18.5, marginalRate: 22 }
+  PII Sanitizer:
+    145000 → income_range: "UPPER_MIDDLE"
+    18.5%  → effective_rate: "18.5%"
+  raw_values DISCARDED ← never stored anywhere
+  taxInsights = { income_range, tax_bracket, effective_rate, deductions_level }
+```
+
+### Step 2 — Routing (deterministic, not LLM)
+
+```
+routeDocument("tax_document")
+  → { agents: [profile, tax, simulation, explanation], ui: [...] }
+  ← ROUTING_MAP lookup, no LLM involved
+```
+
+### Step 3 — Pipeline (planner skipped — plan pre-seeded)
+
+```
+node_profile   → profile extracted from document context
+node_tax       → tax analysis from taxInsights (22% bracket, MODERATE deductions)
+               sub-agents: parseTaxSignals → analyzeDeductions (pure fn)
+                           → taxChain (LLM: strategy text) → rankStrategies (pure fn)
+node_simulation → calculator.js projection with real profile
+node_explanation → narrative referencing all computed state
+```
+
+### Step 4 — Session updated
+
+```
+Redis: { profile, simulation, tax, documentInsights: { tax: taxInsights } }
+StateManager: seeded with full session state
+```
+
+### Step 5 — Follow-up chat "Tell me more about my taxes"
+
+```
+Redis loads session → taxInsights available
+Planner: "tax" in agents
+node_tax: re-runs with persisted taxInsights
+No document re-upload needed
+```
+
+---
+
+## The LLM Boundary (What the LLM Can and Cannot Do)
+
+### LLM CAN
+
+```
+✅ Classify intent: "user wants retirement projection"
+✅ Extract profile from text: "age: 35, income: 80000"
+✅ Write narrative summary (using pre-computed numbers)
+✅ Write portfolio rationale (using pre-computed allocation)
+✅ Write risk factor descriptions (using pre-computed score)
+✅ Suggest tax optimization strategies (using abstracted signals)
+✅ Write final explanation
+```
+
+### LLM CANNOT
+
+```
+❌ Compute savings projections     → financial.calculator.js does this
+❌ Decide allocation percentages   → portfolio.compute.js does this
+❌ Set risk score                  → risk.compute.js does this
+❌ Calculate stress test amounts   → risk.compute.js does this
+❌ Trigger recomputation           → ReactiveEngine dependency map does this
+❌ Skip required agent steps       → LangGraph routing + guardrails prevent this
+❌ Access or store raw PII         → PII sanitizer runs before any chain invocation
+```
+
+**Why this matters:** If the LLM hallucinates, you get a poorly worded sentence. You never get a wrong projected savings number — because the LLM never computed it.
+
+---
+
+## Dependency Graph — The Heart of the System
+
+```javascript
+// reactive.engine.js — hardcoded, never changes at runtime
+const DEPENDENCY_MAP = {
+  PROFILE_UPDATED:    ['simulation', 'portfolio', 'risk'],
+  TAX_UPDATED:        ['simulation'],
+  CASHFLOW_UPDATED:   ['simulation'],
+  SIMULATION_UPDATED: ['portfolio', 'risk'],
+  PORTFOLIO_UPDATED:  ['risk'],
+}
+```
+
+Answering the design review questions:
+
+| Question | Answer | Mechanism |
+|----------|--------|-----------|
+| If income changes, does simulation ALWAYS rerun? | **Yes** | PROFILE_UPDATED → ReactiveEngine → recomputeSimulation() |
+| Where is the single source of truth? | **StateManager + Redis** | state = { profile, simulation, portfolio, risk, tax, cashflow } |
+| What prevents LLM from skipping steps? | **LangGraph routing + guardrails** | Pure code, not prompts |
+| Can two runs produce different numbers? | **No** | Compute functions are pure, same input → same output |
+| Who guarantees recomputation — system or LLM? | **System** | ReactiveEngine listens for events, not LLM instructions |
+
+---
+
+## Trust-by-Design — What "Never Stored" Actually Means
+
+The claim "raw PII is never stored" is enforced architecturally, not by policy:
+
+```
+1. multer.memoryStorage() — file NEVER touches disk (Node.js in-memory buffer only)
+2. DocumentIngestionAgent — raw_values exist only in a local variable, discarded in same function call
+3. PII sanitizer runs synchronously before any async operation
+4. Abstracted signals are the ONLY thing passed to Redis.updateSession()
+5. LangGraph state channels never contain raw_values (they're stripped before graph.invoke())
+```
+
+The system cannot store raw PII even if a developer wanted to — the pipeline doesn't expose a path for it.
+
+---
+
+## Reactive Event Flow (WebSocket)
+
+As each agent completes, events push to the Angular UI in real time:
 
 ```
 POST /api/chat
-  → EventEmitter.emitAgentStarted('planner')   → WS: { type: "AGENT_STARTED", agent: "planner" }
-  → node_planner runs
-  → node_profile runs
-  → EventEmitter.emitProfileUpdated(profile)   → WS: { type: "PROFILE_UPDATED", data: profile }
-  → node_simulation runs
-  → EventEmitter.emitSimulationUpdated(sim)    → WS: { type: "SIMULATION_UPDATED", data: sim }
-  → HTTP response returned with full result
+  [0ms]    AGENT_STARTED:planner
+  [1200ms] PLANNER_DECIDED         → UI knows which panels to prepare
+  [1200ms] AGENT_STARTED:profile
+  [2100ms] PROFILE_UPDATED         → Profile panel renders
+  [2100ms] AGENT_STARTED:simulation
+  [2200ms] (ReactiveEngine also triggers — recomputes in background)
+  [3300ms] SIMULATION_UPDATED      → Simulation chart renders
+  [3300ms] AGENT_STARTED:explanation
+  [4100ms] EXPLANATION_READY       → Chat message appears
+
+HTTP response arrives at [4200ms] with full data as backup source.
 ```
 
-Angular's WebSocketService subscribes and can surface intermediate updates in real time.
-
----
-
-## Work Laptop Setup
-
-Minimum requirements — no Docker needed:
-
-1. Set `OPENAI_API_KEY` in `backend/.env`
-2. `cd backend && npm install && npm start`
-3. `cd frontend && npm install && npm start`
-
-Redis → in-memory Map fallback (session data works, just not persisted across restarts)  
-ChromaDB → keyword search fallback (RAG works, just not semantic)  
-Ollama → not needed (OpenAI used instead)
-
-**To switch back to Ollama**: comment out `OPENAI_API_KEY`, uncomment `OLLAMA_*` lines.
-
----
-
-## Session Markdown Files
-
-Every conversation turn generates a `.md` file at `backend/data/sessions/<sessionId>.md`.
-
-**Dual purpose:**
-1. **LLM context injection**: On the next turn, this file is read and injected into agent prompts so the LLM has conversational memory even across restarts.
-2. **RAG source**: The file (or a summary of it) is embedded in ChromaDB, enabling semantic retrieval across sessions.
-
-**PII audit trail**: These files intentionally contain NO sensitive data — they're the audit record that proves the system's privacy claims.
-
----
-
-## What the LLM Actually Reasons About
-
-The LLM never sees your raw tax return. It sees:
-
-```
-Tax signals (abstracted):
-{
-  "income_range": "HIGH",
-  "tax_bracket": "32%",
-  "effective_rate": "10.6%",
-  "deductions_level": "MODERATE",
-  "filing_status": "married_filing_jointly"
-}
-```
-
-This is enough to reason about: "Should this person contribute to a Roth IRA vs traditional 401k? Are they maximizing HSA? Is there capital gains harvesting opportunity?"
-
-The LLM operates on **financial signals**, not **personal identity**.
+Users see panels appear progressively rather than waiting 4+ seconds for everything.

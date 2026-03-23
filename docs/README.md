@@ -1,18 +1,20 @@
 # AI Financial Planner — POC
 
-An end-to-end agentic financial planning system built with:
+> **Architecture**: State-driven deterministic system with an AI interface.
+> Numbers from math. Text from LLMs. Control flow from code.
 
 | Layer | Technology |
 |-------|------------|
 | LLM Orchestration | LangChain.js |
-| Agent Flow | LangGraph |
-| Observability | LangSmith |
+| Agent Flow | LangGraph StateGraph |
+| Reactive Engine | Custom event-driven cascade (zero LLM) |
+| Compute Modules | Pure JS math (compound interest, glide path, risk scoring) |
 | Backend | Node.js + Express + WebSocket |
 | Frontend | Angular 17 (standalone components) |
-| Structured Memory | Redis |
-| Semantic Memory | ChromaDB (vector DB) |
+| Session State | Redis (falls back to in-memory Map) |
+| Semantic Memory | ChromaDB (falls back to keyword search) |
 | Human-readable Memory | Markdown files |
-| Local LLM | Ollama (llama3.2) |
+| LLM Providers | Groq (free) · Gemini (free) · OpenAI · Ollama (local) |
 
 ---
 
@@ -21,18 +23,19 @@ An end-to-end agentic financial planning system built with:
 ### 1. Prerequisites
 
 ```bash
-# Node.js 20+
-node --version
+node --version   # 18+
 
-# Ollama — install from https://ollama.ai
+# Option A: Groq (free, recommended — sign up at console.groq.com)
+echo "GROQ_API_KEY=gsk_..." >> backend/.env
+
+# Option B: Ollama (local, no key needed)
+brew install ollama
 ollama pull llama3.2
+ollama pull nomic-embed-text   # dedicated embedding model
 
-# Redis (via Docker is easiest)
-docker run -d -p 6379:6379 redis:7
-
-# ChromaDB
-pip install chromadb
-chroma run --port 8000
+# Optional: Redis + ChromaDB (both have graceful fallbacks)
+docker run -d -p 6379:6379 redis:7-alpine
+docker run -d -p 8000:8000 chromadb/chroma
 ```
 
 ### 2. Backend
@@ -40,7 +43,6 @@ chroma run --port 8000
 ```bash
 cd backend
 npm install
-cp .env .env.local    # edit LANGSMITH_API_KEY if you have one
 npm run dev
 ```
 
@@ -55,14 +57,58 @@ npm start
 
 ---
 
-## Architecture Overview
+## Architecture in One Diagram
 
-See [ARCHITECTURE.md](ARCHITECTURE.md).
+```
+User Message
+    │
+    ▼
+Planner (LLM) ── intent + UI decisions only
+    │
+    ▼
+Profile (LLM) ── entity extraction
+    │
+    ├──► Tax / Cashflow ── pure-fn signals → LLM strategy text
+    │
+    ▼
+Simulation ── financial.calculator.js (math) → LLM summary text
+    │
+    ▼
+Portfolio ── portfolio.compute.js (math) → LLM rationale text
+    │
+    ▼
+Risk ── risk.compute.js (math) → LLM factor text
+    │
+    ▼
+Explanation (LLM) ── synthesises all computed state → plain text
 
-## Agent Reference
+── (parallel, event-driven) ──────────────────────────────────────
+ReactiveEngine ── recomputes simulation/portfolio/risk on any
+                  upstream state change — ZERO LLM calls
+```
 
-See [AGENTS.md](AGENTS.md).
+---
 
-## Runbook
+## Key Architectural Properties
 
-See [RUNBOOK.md](RUNBOOK.md).
+| Property | Answer |
+|----------|--------|
+| Who computes savings projections? | `financial.calculator.js` — never the LLM |
+| Who computes risk score? | `risk.compute.js` — 3-factor deterministic formula |
+| If income changes, does simulation rerun? | Yes — ReactiveEngine guarantees it |
+| Can two runs produce different numbers? | No — compute functions are pure |
+| Where is the single source of truth? | `StateManager` (in-process) + `Redis` (durable) |
+| Is raw PII ever stored? | No — sanitized to range labels before any storage |
+
+---
+
+## Documentation
+
+| File | Contents |
+|------|----------|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Layered architecture, state model, agent contract, LLM boundary, dependency graph |
+| [AGENTS.md](AGENTS.md) | All 9 agents: hybrid pipeline, inputs/outputs, compute rules |
+| [HOW-IT-WORKS.md](HOW-IT-WORKS.md) | End-to-end flows, reactive consistency, trust-by-design explained |
+| [WORKING.md](WORKING.md) | Demo script, expected logs, PII verification |
+| [RUNBOOK.md](RUNBOOK.md) | Setup, API reference, environment config |
+| [SYSTEM-DOCUMENTATION.md](SYSTEM-DOCUMENTATION.md) | Complete technical reference (23 sections) |

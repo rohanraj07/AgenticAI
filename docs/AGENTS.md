@@ -1,50 +1,92 @@
-# Agent Reference
+# Agent Reference — AI Financial Planner
 
-This document provides a comprehensive reference for all agents in the AgenticAI financial planning system. Each agent is a discrete node in the LangGraph pipeline, responsible for a specific domain of reasoning. The system is designed around a **TRUST-BY-DESIGN** principle: sensitive user data is abstracted as early as possible and raw values are never propagated downstream.
+> Version: v2 — Hybrid deterministic compute + LLM narrative
+
+---
+
+## Agent Contract
+
+Every agent that touches financial data follows this contract:
+
+```javascript
+// Pure compute step (deterministic, no LLM)
+computeResult = computeFn(state)   // same input → same numbers, always
+
+// Narrative step (LLM, text only)
+narrative = await llmChain.invoke({ ...computeResult, ...contextForLLM })
+
+// Final output
+return { ...computeResult, ...narrative }
+```
+
+**Rules enforced across all compute agents:**
+- No randomness in the compute step
+- No LLM inside financial calculations
+- No chat history dependency in compute
+- LLM receives pre-computed numbers — it cannot change them
 
 ---
 
 ## Architecture Overview
 
 ```
-User Message
-     │
-     ▼
-PlannerAgent (Orchestrator)
-     │
-     ├──► ProfileAgent
-     ├──► DocumentIngestionAgent ──► (abstracted signals only)
-     │                                      │
-     ├──► SimulationAgent ◄─────────────────┤
-     ├──► PortfolioAgent  ◄─────────────────┤
-     ├──► RiskAgent       ◄─────────────────┤
-     ├──► TaxAgent        ◄─────────────────┤
-     ├──► CashflowAgent   ◄─────────────────┤
-     │
-     └──► ExplanationAgent (synthesises all)
-                │
-                ▼
-         Structured Response + A2UI Layout
+User Message / Document Upload
+         │
+         ▼
+PlannerAgent ──── intent + UI decisions only (LLM)
+         │
+         ▼  (conditional: plan.agents[] drives execution)
+ProfileAgent ──── entity extraction (LLM)
+         │
+         ├──► TaxAgent    ──── pure-fn signals → LLM strategy text
+         ├──► CashflowAgent ── pure-fn signals → LLM recommendation text
+         │
+         ▼
+SimulationAgent ── calculator.js (math) → LLM summary text
+         │
+         ▼
+PortfolioAgent ─── portfolio.compute.js (math) → LLM rationale text
+         │
+         ▼
+RiskAgent ──────── risk.compute.js (math) → LLM factor text
+         │
+         ▼
+ExplanationAgent ── LLM synthesises all computed state → plain text
+
+         ── (parallel, event-driven) ──────────────────────────────────
+ReactiveEngine ─── recomputes simulation/portfolio/risk deterministically
+                   when PROFILE_UPDATED / TAX_UPDATED / etc fires
+                   ZERO LLM calls in reactive path
 ```
 
 ---
 
 ## 1. PlannerAgent
 
-**LangGraph Node**: `planner`
 **File**: `backend/agents/planner.agent.js`
+**LangGraph node**: `node_planner`
+**Skipped when**: plan is pre-seeded by upload route
 
-### Purpose
+### Restricted Role
 
-The PlannerAgent is the central orchestrator of the system. It interprets the user's intent, decides which downstream agents to invoke, determines the UI layout to render (Agent-to-UI / A2UI), and routes tax and cashflow queries to their respective specialist agents.
+The planner is an **intent classifier**, not an orchestrator. It answers two questions only:
+
+1. What does the user want? (intent)
+2. Which UI panels should render?
+
+It does NOT:
+- Trigger or prevent recomputation
+- Execute financial logic
+- Decide whether simulation is "fresh enough"
 
 ### Input
 
 ```json
 {
   "message": "Can I retire at 55?",
-  "context": "<previous conversation turns>",
-  "uploaded_doc": "<optional: document signals if document was ingested>"
+  "context": "<conversation history>",
+  "profileExists": "yes",
+  "simulationExists": "no"
 }
 ```
 
@@ -52,44 +94,52 @@ The PlannerAgent is the central orchestrator of the system. It interprets the us
 
 ```json
 {
-  "intent": "Retirement feasibility check",
-  "agents": ["profile", "simulation", "portfolio", "risk", "tax", "explanation"],
+  "intent": "Retirement feasibility check at age 55",
+  "required_agents": ["profile", "simulation", "explanation"],
+  "optional_agents": ["portfolio"],
+  "missing_data": ["tax_document"],
+  "confidence": "high",
+  "decision_rationale": "Included simulation because user asked about retirement timeline.",
+  "agents": ["profile", "simulation", "explanation"],
   "ui": [
     { "type": "profile_summary" },
     { "type": "simulation_chart" },
-    { "type": "portfolio_allocation" },
-    { "type": "risk_scorecard" }
-  ],
-  "routing": {
-    "tax": true,
-    "cashflow": false
-  },
-  "params": {}
+    { "type": "explanation_panel" }
+  ]
 }
 ```
 
-### Notes
+### Guardrails (enforced in code, not by LLM)
 
-- Sole entry point into the agent graph; no other agent calls agents directly.
-- Responsible for A2UI decisions: maps agent outputs to specific UI component types.
-- Tax and cashflow routing is conditional — only activated when the planner detects relevant intent signals.
+| Rule | Code location |
+|------|--------------|
+| `explanation` always present | `planner.agent.js` post-processes LLM output |
+| `portfolio` requires `simulation` | `planner.agent.js` injects `simulation` if missing |
+| `risk` requires `portfolio` → `simulation` | `planner.agent.js` injects both |
+| Chain failure → `SAFE_DEFAULT_PLAN` | try/catch in `planner.agent.js` |
+
+### SAFE_DEFAULT_PLAN (fallback on chain failure)
+
+```javascript
+{ agents: ['profile', 'simulation', 'explanation'], confidence: 'low', ... }
+```
 
 ---
 
 ## 2. ProfileAgent
 
-**LangGraph Node**: `profile`
 **File**: `backend/agents/profile.agent.js`
+**LangGraph node**: `node_profile`
 
-### Purpose
+### Role
 
-Extracts and maintains a structured financial profile for the user by parsing conversation history, Redis memory, and RAG-retrieved context. Produces the canonical user profile object used by all downstream agents.
+Extracts structured profile from natural language using LLM entity recognition. Runs on every request (unless `profileExists` is true and planner skips it).
 
 ### Input
 
-- Raw user message
-- Redis conversation memory (session context)
-- RAG-retrieved financial context
+- User message (natural language)
+- Session memory (markdown)
+- RAG context (ChromaDB)
 
 ### Output
 
@@ -102,86 +152,116 @@ Extracts and maintains a structured financial profile for the user by parsing co
   "monthly_expenses": 3500,
   "retirement_age": 65,
   "risk_tolerance": "medium",
-  "goals": ["retire_early", "buy_home"],
-  "dependents": 2,
-  "debt": 15000
+  "goals": ["retire_early", "buy_home"]
 }
 ```
 
-### PII Notes
+### Note on PII
 
-- Profile data is held in session memory and scoped to the active user session.
-- Income and savings figures are used in-flight for computation; they are not logged or persisted to long-term storage beyond the session.
+Profile numeric fields (`income`, `savings`, `monthly_expenses`) are used in-session for deterministic computation. They are held in the session Redis key. These are user-provided values, not extracted from uploaded documents (which are abstracted to range labels by DocumentIngestionAgent).
 
 ---
 
 ## 3. SimulationAgent
 
-**LangGraph Node**: `simulation`
 **File**: `backend/agents/simulation.agent.js`
+**LangGraph node**: `node_simulation`
+**Compute module**: `backend/utils/financial.calculator.js`
 
-### Purpose
+### Hybrid Pipeline
 
-Runs Monte Carlo-style retirement projections based on the user's financial profile, estimating whether the user can meet their retirement goals and surfacing year-by-year savings milestones.
+```
+Step 1 — Deterministic math (financial.calculator.js)
+  calculateRetirementProjection(profile)
+  → FV = PV × (1+r)^n + PMT × [((1+r)^n − 1) / r]
+  → required_savings = annual_expenses × 25  (4% SWR rule)
+  → All numbers: projected_savings, savings_gap, milestones, years_of_runway
+
+Step 2 — LLM narrative (simulationChain)
+  Receives: pre-computed numbers (cannot change them)
+  Returns: { summary: "2-3 sentences", milestone_notes: ["note1", "note2", "note3"] }
+```
 
 ### Input
 
-- User profile (from ProfileAgent)
-- Original user message
-- RAG-retrieved financial context
+- `profile` (from ProfileAgent or DEFAULT_PROFILE)
+- `message` (for narrative context)
+- `ragContext`
 
 ### Output
 
 ```json
 {
   "can_retire_at_target": true,
-  "projected_savings_at_retirement": 1200000,
-  "monthly_shortfall_or_surplus": 500,
-  "years_of_runway": 25,
+  "projected_savings_at_retirement": 1203847,
+  "required_savings_at_retirement": 1050000,
+  "savings_gap": 0,
+  "monthly_shortfall_or_surplus": 643,
+  "years_of_runway": 28,
   "milestones": [
-    { "year": 2030, "savings": 400000, "note": "First major milestone" },
-    { "year": 2035, "savings": 700000, "note": "Halfway to goal" }
+    { "year": 2035, "savings": 480000, "note": "Emergency fund and first major investment milestone." },
+    { "year": 2044, "savings": 840000, "note": "Portfolio reaches critical mass for compounding." },
+    { "year": 2054, "savings": 1203847, "note": "Retirement target achieved." }
   ],
-  "probability_of_success_pct": 82,
-  "summary": "Based on your current trajectory..."
+  "summary": "You are on track to retire at 65 with $1.2M...",
+  "assumptions": {
+    "annual_return": "7%",
+    "withdrawal_rule": "4% SWR (25x rule)",
+    "monthly_savings": 2833,
+    "annual_savings": 34000
+  }
 }
 ```
 
-### Notes
+### LLM failure fallback
 
-- Simulation incorporates inflation assumptions, expected return rates, and variable contribution scenarios.
-- If `DocumentIngestionAgent` has run, abstracted income and spending signals supplement the profile inputs.
+If LLM fails, summary is constructed from the calculated numbers directly — simulation still returns valid data.
 
 ---
 
 ## 4. PortfolioAgent
 
-**LangGraph Node**: `portfolio`
 **File**: `backend/agents/portfolio.agent.js`
+**LangGraph node**: `node_portfolio`
+**Compute module**: `backend/agents/compute/portfolio.compute.js`
 
-### Purpose
+### Hybrid Pipeline
 
-Recommends a target asset allocation strategy tailored to the user's risk tolerance, time horizon, and retirement goals, and provides rationale for each allocation decision.
+```
+Step 1 — Deterministic allocation (portfolio.compute.js)
+  Input: profile.risk_tolerance, profile.age, profile.retirement_age
 
-### Input
+  Base allocation (from risk_tolerance):
+    low    → 30% equities / 55% bonds / 5% real estate / 10% cash
+    medium → 60% equities / 30% bonds / 5% real estate / 5% cash
+    high   → 80% equities / 12% bonds / 5% real estate / 3% cash
 
-- User profile (from ProfileAgent)
-- Simulation results (from SimulationAgent)
+  Glide path (applied automatically):
+    years ≤ 10 → shift −10% equities to bonds  (mid-glide)
+    years ≤ 5  → shift −20% equities to bonds  (near-retirement)
+
+  expected_return = (equity/100 × 9%) + ((1−equity/100) × 3%)
+  rebalance = quarterly (≤5 yrs) | annually
+
+Step 2 — LLM rationale (portfolioRationaleChain)
+  Receives: pre-computed allocation (cannot change percentages)
+  Returns: 2-3 sentence rationale text string
+```
 
 ### Output
 
 ```json
 {
   "allocation": [
-    { "asset": "Equities", "percent": 60 },
-    { "asset": "Bonds", "percent": 25 },
-    { "asset": "Real Estate", "percent": 10 },
-    { "asset": "Cash / Money Market", "percent": 5 }
+    { "asset": "Equities",    "percent": 60 },
+    { "asset": "Bonds",       "percent": 30 },
+    { "asset": "Real Estate", "percent": 5  },
+    { "asset": "Cash",        "percent": 5  }
   ],
-  "strategy": "balanced_growth",
-  "expected_annual_return_percent": 7.2,
+  "strategy": "balanced",
+  "expected_annual_return_percent": 6.6,
   "rebalance_frequency": "annually",
-  "rationale": "Given a 30-year horizon and medium risk tolerance..."
+  "rationale": "With 30 years to retirement and medium risk tolerance, a balanced 60/30 split gives you strong growth potential while bonds provide stability..."
 }
 ```
 
@@ -189,285 +269,243 @@ Recommends a target asset allocation strategy tailored to the user's risk tolera
 
 ## 5. RiskAgent
 
-**LangGraph Node**: `risk`
 **File**: `backend/agents/risk.agent.js`
+**LangGraph node**: `node_risk`
+**Compute module**: `backend/agents/compute/risk.compute.js`
 
-### Purpose
+### Hybrid Pipeline
 
-Scores the user's overall financial risk exposure and stress-tests the recommended portfolio against adverse market scenarios including market crashes and inflation spikes.
+```
+Step 1 — Deterministic scoring (risk.compute.js)
+  Factors (each 0–3):
+    equityRisk = equity% ≥75→3, ≥55→2, else 1                  (weight ×2)
+    timeRisk   = years ≤5→3, ≤10→2, ≤20→1, else 0              (weight ×2)
+    gapRisk    = gap ≥$500k→3, ≥$100k→2, >$0→1, else 0         (weight ×3)
+
+  score = round( (equity×2 + time×2 + gap×3) / 21 × 10 )      → 1–10
+  risk_level: 1-3=low, 4-5=medium, 6-7=high, 8-10=very high
+
+  Stress tests (deterministic):
+    market_crash_20pct_impact = -(projected_savings × equity% × 0.20)
+    inflation_spike_impact    = -(projected_savings × 0.05)
+
+Step 2 — LLM narrative (riskNarrativeChain)
+  Receives: pre-computed score + inputs (cannot change score)
+  Returns: { factors[{factor, impact, description}], mitigation_steps[] }
+```
 
 ### Input
 
-- User profile (from ProfileAgent)
-- Portfolio allocation (from PortfolioAgent)
+- `profile`, `portfolio`, `simulation`
 
 ### Output
 
 ```json
 {
-  "overall_risk_score": 6,
+  "overall_risk_score": 5,
   "risk_level": "medium",
+  "stress_test": {
+    "market_crash_20pct_impact": -144462,
+    "inflation_spike_impact": -60192
+  },
   "factors": [
     {
-      "factor": "Market Volatility",
-      "impact": "high",
-      "description": "Equity-heavy allocation increases short-term drawdown risk."
+      "factor": "Equity Concentration",
+      "impact": "medium",
+      "description": "60% equities provides growth but exposes the portfolio to market swings."
     },
     {
-      "factor": "Inflation Exposure",
-      "impact": "medium",
-      "description": "Current bond allocation provides partial inflation hedge."
+      "factor": "Time Horizon",
+      "impact": "low",
+      "description": "30 years to retirement provides significant time to recover from downturns."
     }
   ],
   "mitigation_steps": [
-    "Consider increasing bond allocation by 5%",
-    "Introduce inflation-linked securities"
-  ],
-  "stress_test": {
-    "market_crash_20pct_impact": -240000,
-    "inflation_spike_3pct_impact": -50000,
-    "prolonged_low_return_impact": -180000
-  }
+    "Rebalance annually to maintain target allocation.",
+    "Consider shifting 5% from equities to bonds as you enter your 50s."
+  ]
 }
 ```
 
 ---
 
-## 6. ExplanationAgent
+## 6. TaxAgent
 
-**LangGraph Node**: `explanation`
-**File**: `backend/agents/explanation.agent.js`
-
-### Purpose
-
-Synthesises all upstream agent outputs into a single coherent, human-readable narrative that directly answers the user's original question. Serves as the final step before the response is sent to the UI.
-
-### Input
-
-- All upstream agent outputs (profile, simulation, portfolio, risk, tax, cashflow)
-- Original user message
-
-### Output
-
-Plain-text narrative paragraph (rendered as the primary chat response), e.g.:
-
-> "Based on your current savings of $200,000 and a monthly contribution of $1,500, you are on track to retire at 65 with an estimated nest egg of $1.2M — giving you approximately 25 years of financial runway. Your balanced portfolio carries a medium risk score of 6/10, and stress testing shows resilience under most market scenarios. To accelerate your timeline, consider increasing monthly contributions by $300 and shifting 5% of equities into bonds as you approach your target date."
-
-### Notes
-
-- Only agent to produce free-form text; all other agents output structured JSON.
-- Tone is calibrated to be informative but accessible — no financial jargon without explanation.
-
----
-
-## 7. DocumentIngestionAgent
-
-**LangGraph Node**: `document_ingestion`
-**File**: `backend/agents/documentIngestion.agent.js`
-
-### Purpose
-
-Processes uploaded financial documents (pay stubs, bank statements, tax returns, brokerage summaries) using multi-modal extraction. Implements **TRUST-BY-DESIGN**: raw document text and specific figures are immediately abstracted into generalised signals; the raw values are discarded and never propagated downstream or stored.
-
-### Input
-
-```json
-{
-  "document_text": "<raw extracted text from uploaded PDF/image>",
-  "document_type": "pay_stub | bank_statement | tax_return | brokerage_summary"
-}
-```
-
-### Output — Abstracted Signals Only
-
-```json
-{
-  "income_range": "75k–100k",
-  "tax_bracket": "22%",
-  "spending_level": "moderate",
-  "savings_rate_band": "15–20%",
-  "debt_load": "low",
-  "investment_activity": "passive_index",
-  "employment_type": "salaried",
-  "signals_confidence": 0.87
-}
-```
-
-### Trust / PII Design
-
-| Principle | Implementation |
-|---|---|
-| **No raw values downstream** | Exact figures (salary amount, account balances) are converted to range/band labels before leaving this agent. |
-| **Immediate discard** | Raw document text is not stored in memory, cache, or logs after extraction completes. |
-| **No PII propagation** | Downstream agents (TaxAgent, CashflowAgent, SimulationAgent) receive only abstracted signal labels — never account numbers, names, or exact monetary values. |
-| **Confidence scoring** | Each signal set carries a `signals_confidence` score; low-confidence extractions are flagged for user clarification rather than assumed. |
-
-### Supported Document Types
-
-- Pay stubs / payslips
-- Bank and credit card statements
-- Federal and state tax returns (W-2, 1040)
-- Brokerage and retirement account summaries (401k, IRA)
-
----
-
-## 8. TaxAgent
-
-**LangGraph Node**: `tax`
 **File**: `backend/agents/tax.agent.js`
+**LangGraph node**: `node_tax`
+**Skipped when**: `taxInsights` is null in graph state
 
-### Purpose
+### Pipeline
 
-Analyzes tax efficiency and produces actionable tax optimization strategies based exclusively on abstracted signals from DocumentIngestionAgent or profile-derived tax context. Provides retirement-phase tax impact analysis and account type recommendations.
+```
+Step 1 — parseTaxSignals()         pure function: validate + normalize signals
+Step 2 — analyzeDeductions()       pure function: score 1–4, flag deduction gap
+Step 3 — taxChain (LLM)            LLM: generate optimization strategies
+Step 4 — rankOptimizationStrategies() pure function: sort by priority, boost gap strategies
+```
+
+The LLM generates strategy text. Code ranks and filters it.
 
 ### Input
 
-```json
-{
-  "tax_bracket": "22%",
-  "income_range": "75k–100k",
-  "investment_activity": "passive_index",
-  "retirement_age": 65,
-  "profile_context": { "age": 35, "risk_tolerance": "medium" }
-}
-```
+- `taxInsights` (abstracted signals from document upload, never raw PII)
+- `profile`, `simulation`
 
 ### Output
 
 ```json
 {
-  "current_tax_efficiency_score": 72,
-  "estimated_tax_drag_band": "moderate",
+  "tax_efficiency_score": 7,
+  "tax_bracket": "22%",
+  "effective_rate": "18.5%",
+  "income_range": "UPPER_MIDDLE",
+  "deductions_level": "MODERATE",
   "optimization_strategies": [
-    {
-      "strategy": "Maximize 401(k) pre-tax contributions",
-      "estimated_annual_benefit": "Reduces taxable income by one bracket band",
-      "priority": "high"
-    },
-    {
-      "strategy": "Roth IRA conversion ladder",
-      "estimated_annual_benefit": "Tax-free growth post-retirement",
-      "priority": "medium"
-    },
-    {
-      "strategy": "Tax-loss harvesting in taxable accounts",
-      "estimated_annual_benefit": "Offsets capital gains",
-      "priority": "low"
-    }
+    { "strategy": "Maximize 401(k) contributions", "priority": "high", "rationale": "..." }
   ],
-  "retirement_tax_impact": {
-    "rmd_exposure": "moderate",
-    "roth_vs_traditional_recommendation": "Roth favored given current bracket",
-    "social_security_taxation_risk": "low"
-  },
-  "disclaimer": "This analysis is for informational purposes only and does not constitute tax advice. Consult a qualified tax professional before making tax-related financial decisions."
+  "retirement_tax_impact": "...",
+  "key_insight": "...",
+  "disclaimer": "Tax analysis based on abstracted signals. Consult a qualified tax advisor."
 }
 ```
-
-### Trust / PII Notes
-
-- Receives only abstracted signal labels from DocumentIngestionAgent — never raw income figures, SSNs, or account details.
-- All strategy recommendations are generalised to bracket bands and range labels, not specific dollar amounts.
-- Disclaimer is always included in output and rendered in the UI.
 
 ---
 
-## 9. CashflowAgent
+## 7. CashflowAgent
 
-**LangGraph Node**: `cashflow`
 **File**: `backend/agents/cashflow.agent.js`
+**LangGraph node**: `node_cashflow`
+**Skipped when**: `cashflowInsights` is null in graph state
 
-### Purpose
+### Pipeline
 
-Analyzes spending patterns and cash flow health from abstracted signals, identifies opportunities for savings acceleration, and provides prioritised recommendations to improve the user's financial trajectory toward retirement goals.
+```
+Step 1 — parseCashflowSignals()    pure function: validate + normalize
+Step 2 — classifySpendingRisk()    pure function: spending level → risk label (low/medium/high/critical)
+Step 3 — cashflowChain (LLM)       LLM: generate recommendations
+Step 4 — deriveSavingsInsight()    pure function: savings score 1–5, acceleration potential
+```
 
 ### Input
 
-```json
-{
-  "spending_level": "moderate",
-  "savings_rate_band": "15–20%",
-  "debt_load": "low",
-  "income_range": "75k–100k",
-  "profile_context": {
-    "age": 35,
-    "monthly_expenses": 3500,
-    "retirement_age": 65
-  }
-}
-```
+- `cashflowInsights` (abstracted signals from document upload, never raw transactions)
+- `profile`
 
 ### Output
 
 ```json
 {
-  "cashflow_health_score": 68,
-  "cashflow_status": "stable_with_room_to_improve",
-  "spending_pattern": "moderate_discretionary",
-  "savings_acceleration_potential": {
-    "band": "medium",
-    "estimated_monthly_increase_range": "$200–$500",
-    "impact_on_retirement_timeline": "Could accelerate retirement by 1–3 years"
-  },
+  "budget_health": "good",
+  "savings_rate_label": "MODERATE",
+  "spending_level": "ELEVATED",
+  "spending_risk": { "risk": "medium", "requires_intervention": false },
+  "monthly_surplus_indicator": "positive",
+  "top_spending_categories": ["Housing", "Food", "Transport"],
   "recommendations": [
-    {
-      "category": "Emergency Fund",
-      "recommendation": "Current savings rate supports a 6-month emergency fund target",
-      "priority": "high"
-    },
-    {
-      "category": "Debt Management",
-      "recommendation": "Low debt load — redirect freed cash flow to retirement contributions",
-      "priority": "medium"
-    },
-    {
-      "category": "Discretionary Spending",
-      "recommendation": "Moderate spending level suggests room to increase savings rate by 3–5%",
-      "priority": "medium"
-    }
+    { "action": "Reduce dining out", "priority": "medium", "impact_on_retirement": "..." }
   ],
-  "savings_rate_benchmark": {
-    "current_band": "15–20%",
-    "recommended_band": "20–25%",
-    "gap": "moderate"
-  }
+  "savings_insight": { "score": 3, "acceleration_potential": "MODERATE" },
+  "disclaimer": "Analysis based on abstracted spending signals. No transaction data was stored."
 }
 ```
 
-### Trust / PII Notes
+---
 
-- Operates exclusively on abstracted spending signals — never raw transaction data, account numbers, or exact balance figures.
-- Recommendations are expressed as ranges and relative labels (e.g., "moderate", "$200–$500") to avoid false precision from abstracted inputs.
+## 8. DocumentIngestionAgent
+
+**File**: `backend/agents/document.ingestion.agent.js`
+**Trigger**: POST /api/upload only
+
+### Pipeline
+
+```
+Raw document text (in-memory buffer, NEVER written to disk)
+        │
+        ▼
+LLM: classify document type + extract raw_values (ephemeral, in-memory only)
+        │
+  raw_values (exist for < 1ms, never stored):
+  { grossIncome: 148500, effectiveTaxRate: 18.5, marginalRate: 22 }
+        │
+        ▼
+PII Sanitizer (pii.sanitizer.js):
+  grossIncome: 148500 → income_range: "UPPER_MIDDLE"
+  effectiveTaxRate: 18.5 → effective_rate: "18.5%"
+  raw_values → DISCARDED
+        │
+        ▼
+routeDocument(docType) → { agents[], ui[], insightKey }
+  (lookup in ROUTING_MAP — deterministic, not LLM)
+        │
+        ▼
+Output: abstracted signals only (pii_stored: false, raw_document_stored: false)
+```
+
+### Document Type Routing
+
+| Type | Agents routed | Insight stored |
+|------|--------------|----------------|
+| `tax_document` | profile, tax, simulation, explanation | `documentInsights.tax` |
+| `bank_statement` | profile, cashflow, simulation, explanation | `documentInsights.cashflow` |
+| `investment_statement` | profile, portfolio, risk, simulation, explanation | `documentInsights.portfolio` |
+| `debt_document` | profile, simulation, cashflow, explanation | `documentInsights.debt` |
+| `unknown` | profile, simulation, explanation | — |
+
+---
+
+## 9. ExplanationAgent
+
+**File**: `backend/agents/explanation.agent.js`
+**LangGraph node**: `node_explanation`
+**Always runs** — final node in every pipeline
+
+### Role
+
+Synthesises all computed state into a human-readable narrative that directly answers the user's original question. Receives pre-computed numbers — writes text only.
+
+### Input
+
+- `profile`, `simulation`, `portfolio`, `risk` (all pre-computed)
+- `message` (user's original question)
+
+### Output
+
+Plain text (3–5 sentences), e.g.:
+
+> "Based on your profile, you are on track to retire at 65 with $1.2M in projected savings — a $150k surplus above the 25× rule target. Your balanced 60/30 allocation carries a medium risk score of 5/10, with stress tests showing a $144k exposure to a 20% market crash. To accelerate your timeline by 2–3 years, consider increasing monthly contributions by $400 and adopting your mid-glide rebalance at age 55."
 
 ---
 
 ## Agent Invocation Matrix
 
 | User Intent | Agents Invoked |
-|---|---|
-| "Can I retire at 55?" | Profile, Simulation, Portfolio, Risk, Explanation |
-| "Review my pay stub" | DocumentIngestion, Profile, Simulation, Tax, Cashflow, Explanation |
-| "How tax-efficient is my portfolio?" | Profile, Tax, Explanation |
-| "Am I spending too much?" | Profile, Cashflow, Explanation |
-| "What's my risk exposure?" | Profile, Portfolio, Risk, Explanation |
-| "Full financial health check" | All agents |
+|-------------|---------------|
+| "Can I retire at 55?" | profile, simulation, explanation |
+| "Show my investment allocation" | profile, simulation, portfolio, risk, explanation |
+| "Review my tax return" | profile, tax, simulation, explanation |
+| "Analyze my bank statement" | profile, cashflow, simulation, explanation |
+| "Am I taking too much risk?" | profile, simulation, portfolio, risk, explanation |
+| Full financial review | All 7 agents |
 
 ---
 
-## Design Principles
+## ReactiveEngine — Automatic Recomputation
 
-### TRUST-BY-DESIGN
+The ReactiveEngine (separate from the LangGraph pipeline) listens for domain events and re-runs compute functions to keep state consistent:
 
-The pipeline is architected so that sensitive financial data is abstracted at the earliest possible point (DocumentIngestionAgent) and only signal labels flow to all subsequent agents. This means:
+```javascript
+// Dependency map (hardcoded in reactive.engine.js)
+PROFILE_UPDATED    → ['simulation', 'portfolio', 'risk']
+TAX_UPDATED        → ['simulation']
+CASHFLOW_UPDATED   → ['simulation']
+SIMULATION_UPDATED → ['portfolio', 'risk']
+PORTFOLIO_UPDATED  → ['risk']
+```
 
-- No raw PII travels through the LangGraph state object between nodes.
-- Agent prompts never see exact salaries, account balances, or tax figures — only banded/labelled abstractions.
-- Logs and traces contain no sensitive financial values.
+When a cascade runs:
+1. Compute functions execute sequentially (each sees updated upstream state)
+2. Results written to StateManager (in-process) AND Redis (durable)
+3. Domain events emitted per recomputed agent → WebSocket push to client
+4. Existing LLM narrative (rationale, factor descriptions) is **preserved** — not regenerated
 
-### Separation of Concerns
-
-Each agent owns a single domain. The PlannerAgent is the only node with cross-agent awareness; all other agents are stateless with respect to each other and communicate only through the shared LangGraph state object.
-
-### Disclaimer Propagation
-
-Any output from TaxAgent is always accompanied by a regulatory disclaimer. The ExplanationAgent is responsible for surfacing this disclaimer in the final user-facing response whenever tax-related content is included.
+**Zero LLM calls in any reactive cascade.**
