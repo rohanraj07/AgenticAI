@@ -3,7 +3,7 @@ import multer from 'multer';
 import { v4 as uuidv4 } from 'uuid';
 import { DocumentIngestionAgent } from '../agents/document.ingestion.agent.js';
 import { buildFinancialGraph } from '../langgraph/graph.js';
-import { redisMemory, vectorStore, eventEmitter } from '../services.js';
+import { redisMemory, vectorStore, eventEmitter, reactiveEngine } from '../services.js';
 import { MarkdownMemory } from '../memory/markdown.memory.js';
 import { log } from '../logger.js';
 
@@ -67,6 +67,7 @@ uploadRoute.post('/upload', upload.single('document'), async (req, res) => {
 
     // 2. Load existing session + RAG context
     const session    = (await redisMemory.getSession(sessionId)) || {};
+    reactiveEngine.seedFromSession(sessionId, session);
     const ragContext = await vectorStore.searchAsContext(`financial document ${fileName}`, sessionId);
 
     // 3. Run DocumentIngestionAgent — classify, extract abstractions, discard raw

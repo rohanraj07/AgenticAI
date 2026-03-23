@@ -1,7 +1,7 @@
 # AI Financial Planner — System Documentation
 
 > **Audience**: Engineers, architects, and operators who need to understand, debug, extend, or operate the system.
-> **Version**: Post-refactor (multi-agent, trust-by-design, LangGraph orchestration)
+> **Version**: Post-refactor v2 (hybrid deterministic + LLM, ReactiveEngine, pure-function compute)
 
 ---
 
@@ -28,6 +28,8 @@
 19. [Data Lifecycle & Retention](#19-data-lifecycle--retention)
 20. [Trust Boundaries](#20-trust-boundaries)
 21. [Concurrency & Event Ordering](#21-concurrency--event-ordering)
+22. [Hybrid Compute Layer (ReactiveEngine + StateManager)](#22-hybrid-compute-layer-reactiveengine--statemanager)
+23. [Pure-Function Compute Modules](#23-pure-function-compute-modules)
 
 ---
 
@@ -50,8 +52,10 @@ An AI-powered financial planning assistant that analyzes a user's financial situ
 ### Core Design Principles
 
 1. **Trust-by-Design** — Exact income, account numbers, and SSNs are processed in-memory and immediately discarded. Only derived signals (e.g. `income_range: "UPPER_MIDDLE"`) are stored.
-2. **Orchestrated Agency** — LangGraph controls execution order deterministically. LLMs only decide *what* to run (planner) and *what to say* (each agent's output).
-3. **Graceful Degradation** — Redis falls back to in-memory, ChromaDB falls back to in-memory, every graph node has try/catch so one failing agent cannot crash the pipeline.
+2. **Hybrid Compute** — All financial numbers (savings projections, risk scores, portfolio allocations, stress tests) are produced by deterministic math functions. LLMs write narrative text only — they never produce or alter numbers.
+3. **Orchestrated Agency** — LangGraph controls execution order deterministically. LLMs only decide *what* to run (planner) and *what to say* (narrative/explanation).
+4. **Reactive Consistency** — The ReactiveEngine listens for upstream state changes (e.g. `PROFILE_UPDATED`) and automatically re-computes all downstream agents (simulation → portfolio → risk) without LLM involvement.
+5. **Graceful Degradation** — Redis falls back to in-memory, ChromaDB falls back to in-memory, every graph node has try/catch so one failing agent cannot crash the pipeline.
 
 ---
 
@@ -90,13 +94,27 @@ An AI-powered financial planning assistant that analyzes a user's financial situ
                                    │ agent invocations
                                    ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  AGENT LAYER                                                      │
+│  AGENT LAYER (Hybrid: deterministic compute + LLM narrative)      │
 │  PlannerAgent    ProfileAgent     SimulationAgent                │
 │  TaxAgent        CashflowAgent    PortfolioAgent                 │
 │  RiskAgent       ExplanationAgent DocumentIngestionAgent         │
 │                                                                   │
-│  Each agent: PromptTemplate → LLM (Ollama/OpenAI) → Parser      │
-│  Tax + Cashflow have internal pure-function sub-agent pipelines  │
+│  Simulation: calculator.js math → LLM writes summary text only  │
+│  Portfolio:  portfolio.compute.js → LLM writes rationale only   │
+│  Risk:       risk.compute.js     → LLM writes factor text only  │
+│  Tax/Cashflow: pure-function sub-agents → LLM writes strategies │
+└──────────────────┬──────────────────────────┬────────────────────┘
+                   │ events (PROFILE_UPDATED…) │ read state
+                   ▼                           │
+┌─────────────────────────────────────────────────────────────────┐
+│  REACTIVE ENGINE LAYER                                            │
+│  ReactiveEngine — dependency-map cascade (NO LLM)                │
+│  StateManager   — per-session central state (in-process)         │
+│                                                                   │
+│  PROFILE_UPDATED    → recompute simulation, portfolio, risk      │
+│  SIMULATION_UPDATED → recompute portfolio, risk                  │
+│  PORTFOLIO_UPDATED  → recompute risk                             │
+│  TAX/CASHFLOW_UPDATED → recompute simulation                     │
 └──────────────────┬───────────────────────────────────────────────┘
                    │ read/write
                    ▼
@@ -213,13 +231,20 @@ LangGraph.invoke({ message, profile, taxInsights, cashflowInsights, … })
 | Field | Value |
 |---|---|
 | **File** | `backend/agents/simulation.agent.js` |
-| **Responsibility** | Run financial projection to retirement |
+| **Responsibility** | Compute retirement projection (deterministic math) + LLM narrative summary |
 | **Trigger** | Plan includes `"simulation"` |
-| **Inputs** | `profile`, `message`, `ragContext`, `currentYear` |
-| **Output** | `{ can_retire_at_target, projected_savings_at_retirement, monthly_shortfall_or_surplus, years_of_runway, milestones[3], summary }` |
+| **Inputs** | `profile`, `message`, `ragContext` |
+| **Output** | `{ can_retire_at_target, projected_savings_at_retirement, required_savings_at_retirement, savings_gap, monthly_shortfall_or_surplus, years_of_runway, milestones[3], summary, assumptions{} }` |
 | **Dependencies** | Runs after profile (uses profile data; falls back to `DEFAULT_PROFILE` if null) |
 
-**Note**: Exactly 3 milestones are generated at roughly equal intervals to prevent LLM over-generation.
+**Internal pipeline** (hybrid):
+
+| Step | Component | What it does |
+|---|---|---|
+| 1 | `financial.calculator.js` | Compound interest projection, 4% SWR, 3 milestones at 1/3 intervals |
+| 2 | `simulationChain` (LLM) | Writes 2–3 sentence summary + 1-sentence note per milestone |
+
+**Note**: The LLM never produces numbers. All projection values come from the calculator. If the LLM fails, a fallback summary is constructed from the calculated numbers.
 
 ---
 
@@ -228,11 +253,26 @@ LangGraph.invoke({ message, profile, taxInsights, cashflowInsights, … })
 | Field | Value |
 |---|---|
 | **File** | `backend/agents/portfolio.agent.js` |
-| **Responsibility** | Recommend investment allocation based on risk tolerance and simulation |
+| **Responsibility** | Compute deterministic allocation + LLM rationale text |
 | **Trigger** | Plan includes `"portfolio"` |
 | **Inputs** | `profile`, `simulation` |
 | **Output** | `{ allocation[], strategy, expected_annual_return_percent, rebalance_frequency, rationale }` |
 | **Dependencies** | Requires simulation results |
+
+**Internal pipeline** (hybrid):
+
+| Step | Component | What it does |
+|---|---|---|
+| 1 | `portfolio.compute.js` | Base allocation from risk tolerance + glide-path tilt by years to retirement |
+| 2 | `portfolioRationaleChain` (LLM) | Writes 2–3 sentence rationale text explaining why this allocation fits the user |
+
+**Compute rules** (deterministic, no LLM):
+- `low` risk → 30% equities / 55% bonds / 5% real estate / 10% cash
+- `medium` risk → 60% equities / 30% bonds / 5% real estate / 5% cash
+- `high` risk → 80% equities / 12% bonds / 5% real estate / 3% cash
+- ≤10 years to retirement: −10% equities shifted to bonds (mid-glide path)
+- ≤5 years to retirement: −20% equities shifted to bonds (near-retirement path)
+- Expected return = equity% × 9% + bond% × 3% (weighted blend)
 
 ---
 
@@ -241,11 +281,29 @@ LangGraph.invoke({ message, profile, taxInsights, cashflowInsights, … })
 | Field | Value |
 |---|---|
 | **File** | `backend/agents/risk.agent.js` |
-| **Responsibility** | Score financial risk and provide mitigation steps |
+| **Responsibility** | Compute deterministic risk score + stress tests + LLM factor narrative |
 | **Trigger** | Plan includes `"risk"` |
-| **Inputs** | `profile`, `portfolio` |
+| **Inputs** | `profile`, `portfolio`, `simulation` |
 | **Output** | `{ overall_risk_score, risk_level, factors[], mitigation_steps[], stress_test{} }` |
-| **Dependencies** | Requires portfolio results |
+| **Dependencies** | Requires portfolio + simulation results |
+
+**Internal pipeline** (hybrid):
+
+| Step | Component | What it does |
+|---|---|---|
+| 1 | `risk.compute.js` | Score 1–10 from equity%, time horizon, savings gap; compute stress tests |
+| 2 | `riskNarrativeChain` (LLM) | Writes factor descriptions + mitigation step strings only |
+
+**Scoring formula** (deterministic, no LLM):
+```
+equityRisk = equity% ≥75 → 3, ≥55 → 2, else 1        (weight ×2)
+timeRisk   = years ≤5 → 3, ≤10 → 2, ≤20 → 1, else 0  (weight ×2)
+gapRisk    = gap ≥$500k → 3, ≥$100k → 2, >0 → 1, else 0 (weight ×3)
+score      = round( (equity×2 + time×2 + gap×3) / 21 × 10 )  →  1–10
+```
+**Stress tests** (deterministic):
+- `market_crash_20pct_impact` = −(projected_savings × equity% × 0.20)
+- `inflation_spike_impact` = −(projected_savings × 0.05)
 
 ---
 
@@ -1183,67 +1241,104 @@ DynamicRendererComponent (subscribes)
 
 ## 14. LLM vs Deterministic — Full Agent Map
 
-### Which Components Call the LLM
+### Hybrid Agent Model
 
-Every agent that invokes a LangChain chain makes an LLM call. Output is non-deterministic — the same input can produce different wording on every run.
+As of v2, agents are **hybrid**: a deterministic compute function runs first and produces all numbers, then the LLM writes only narrative text referencing those pre-computed values.
 
-| Agent | Chain | LLM is asked to |
+```
+Agent.run(inputs)
+    │
+    ├── Step 1: compute_fn(inputs)    ← pure JS math, no LLM
+    │     Returns: numbers, scores, allocations
+    │
+    └── Step 2: llm_chain.invoke(...)  ← LLM sees computed numbers
+          Returns: narrative text only (summary / rationale / descriptions)
+```
+
+### LLM Role per Agent
+
+| Agent | Chain | LLM is asked to produce |
 |---|---|---|
-| **PlannerAgent** | `plannerChain` | Classify intent, select agents, plan UI |
-| **ProfileAgent** | `profileChain` | Extract name, age, income, goals from message |
-| **SimulationAgent** | `simulationChain` | Project savings forward, generate 3 milestones |
-| **PortfolioAgent** | `portfolioChain` | Recommend asset allocation percentages |
-| **RiskAgent** | `riskChain` | Score risk, identify factors and mitigations |
-| **TaxAgent** | `taxChain` | Generate tax optimization strategies |
-| **CashflowAgent** | `cashflowChain` | Generate spending reduction recommendations |
-| **ExplanationAgent** | `explanationChain` | Write human-readable summary (plain text) |
-| **DocumentIngestionAgent** | `documentIngestionChain` | Classify document, extract raw ephemeral values |
+| **PlannerAgent** | `plannerChain` | Intent label, agents list, UI panels, confidence |
+| **ProfileAgent** | `profileChain` | Structured JSON from natural language (entity extraction) |
+| **SimulationAgent** | `simulationChain` | 2–3 sentence summary + 3 milestone notes (numbers pre-computed) |
+| **PortfolioAgent** | `portfolioRationaleChain` | 2–3 sentence rationale explaining why allocation fits the user |
+| **RiskAgent** | `riskNarrativeChain` | Factor descriptions + mitigation steps text (score pre-computed) |
+| **TaxAgent** | `taxChain` | Tax optimization strategy text (ranked by code, not LLM) |
+| **CashflowAgent** | `cashflowChain` | Spending recommendations text (risk classified by code) |
+| **ExplanationAgent** | `explanationChain` | Final 3–5 sentence human-readable response (plain text) |
+| **DocumentIngestionAgent** | `documentIngestionChain` | Document classification + ephemeral raw_values extraction |
 
-**Total LLM calls in a full pipeline run**: up to 9 (one per agent that is routed to).
+**Total LLM calls per full pipeline**: up to 9. In hybrid agents, compute runs first — LLM only sees the result.
+
+### What the LLM NEVER Does
+
+| Forbidden LLM Action | Why | How it's enforced |
+|---|---|---|
+| Calculate savings projections | Hallucination risk | `financial.calculator.js` runs before LLM |
+| Assign portfolio allocation % | Inconsistent numbers | `portfolio.compute.js` runs before LLM |
+| Set the risk score (1–10) | Unpredictable scoring | `risk.compute.js` runs before LLM |
+| Compute stress test dollar amounts | Arithmetic errors | `risk.compute.js` runs before LLM |
+| Decide execution order of agents | Control-flow integrity | LangGraph routing functions (pure code) |
+| Store or recall PII | Privacy violation | PII sanitizer discards raw values before any storage |
 
 ### Which Components are Purely Deterministic
 
-These components contain **zero LLM calls**. Output is fully predictable for the same input.
+These components contain **zero LLM calls**.
 
 | Component | File | What it does |
 |---|---|---|
-| LangGraph routing functions | `graph.js` | `if agents.includes('portfolio')` → next node |
-| `withFallback()` wrapper | `graph.js` | try/catch per node, event emission |
-| PlannerAgent guardrails | `planner.agent.js` | Enforce `explanation` always present, dependency rules |
-| `SAFE_DEFAULT_PLAN` | `planner.agent.js` | Static fallback object returned on chain failure |
-| Tax sub-agents | `subagents/tax.subagents.js` | Normalize signals, score deductions, sort strategies |
+| Retirement calculator | `utils/financial.calculator.js` | FV compound interest, annuity formula, 4% SWR rule, milestones |
+| Portfolio compute | `agents/compute/portfolio.compute.js` | Risk-tolerance base allocation + glide-path shift + expected return |
+| Risk compute | `agents/compute/risk.compute.js` | 3-factor weighted score (equity, time, gap) + stress tests |
+| ReactiveEngine | `engine/reactive.engine.js` | Re-runs compute on upstream state change (no LLM) |
+| StateManager | `engine/state.manager.js` | Per-session in-process state with atomic merge |
+| LangGraph routing | `graph.js` | `if agents.includes('portfolio')` → next node |
+| `withFallback()` wrapper | `graph.js` | Per-node try/catch, event emission |
+| PlannerAgent guardrails | `planner.agent.js` | Enforce `explanation` always present; dependency rules |
+| `SAFE_DEFAULT_PLAN` | `planner.agent.js` | Static fallback on chain failure |
+| Tax sub-agents | `subagents/tax.subagents.js` | Normalize signals, score deductions, rank strategies |
 | Cashflow sub-agents | `subagents/cashflow.subagents.js` | Normalize signals, classify risk, score savings |
-| PII sanitizer | `utils/pii.sanitizer.js` | Map raw numbers to range labels (threshold logic) |
+| PII sanitizer | `utils/pii.sanitizer.js` | Map raw numbers to range labels (threshold rules) |
 | `ROUTING_MAP` | `utils/document.routing.js` | Static document-type → agents/UI lookup |
-| Redis reads/writes | `memory/redis.memory.js` | Pure I/O |
-| Markdown read/write | `memory/markdown.memory.js` | Pure file I/O + string formatting |
-| Vector store add/search | `vector/vector.store.js` | ChromaDB API calls (deterministic given same embedding model) |
-| Session ID generation | `uuid` library | Cryptographically random UUID |
 
 ### Mental Model
 
 ```
-┌────────────────────────────────────────────────────────┐
-│  NON-DETERMINISTIC  (LLM)                              │
-│                                                        │
-│  PlannerAgent → decides WHAT to run                    │
-│  ProfileAgent → decides WHAT the profile IS            │
-│  SimulationAgent → decides HOW to narrate projections  │
-│  ...all other agents → decide WHAT to say              │
-└────────────────────────────────────────────────────────┘
-         ↓ output (JSON or text)
-┌────────────────────────────────────────────────────────┐
-│  DETERMINISTIC  (Code)                                 │
-│                                                        │
-│  LangGraph → decides WHICH node runs NEXT              │
-│  Guardrails → enforce dependency rules on plan         │
-│  Sub-agents → post-process + rank LLM output           │
-│  PII sanitizer → redact raw values to range labels     │
-│  Redis/Markdown/Vector → store only what code permits  │
-└────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│  DETERMINISTIC COMPUTE LAYER  (pure JS math, no LLM)          │
+│                                                                │
+│  financial.calculator.js → FV formula, milestones             │
+│  portfolio.compute.js    → glide path allocation               │
+│  risk.compute.js         → 3-factor weighted score            │
+│  ReactiveEngine          → auto-cascade on upstream change     │
+│  StateManager            → atomic per-session state           │
+└────────────────────────────────────────────────────────────────┘
+         ↓ computed numbers passed into LLM prompts
+┌────────────────────────────────────────────────────────────────┐
+│  LLM NARRATIVE LAYER  (non-deterministic)                      │
+│                                                                │
+│  PlannerAgent     → intent + UI decisions                      │
+│  ProfileAgent     → entity extraction from natural language    │
+│  SimulationAgent  → summary text (references computed numbers) │
+│  PortfolioAgent   → rationale text (references computed alloc) │
+│  RiskAgent        → factor descriptions (references score)     │
+│  TaxAgent         → strategy recommendations                   │
+│  CashflowAgent    → spending recommendations                   │
+│  ExplanationAgent → final user-facing narrative                │
+└────────────────────────────────────────────────────────────────┘
+         ↓ all output gated by
+┌────────────────────────────────────────────────────────────────┐
+│  DETERMINISTIC CONTROL LAYER  (pure code)                      │
+│                                                                │
+│  LangGraph routing → WHICH node runs NEXT                      │
+│  Guardrails        → dependency rules enforced in code         │
+│  PII sanitizer     → raw values never reach storage            │
+│  ROUTING_MAP       → document type → agent/UI mapping          │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-> **Key principle**: LLMs decide *content*. Code decides *control flow, storage, and safety*.
+> **Key principle**: Numbers come from math. Text comes from LLMs. Control flow comes from code.
 
 ---
 
@@ -1942,3 +2037,182 @@ Timeline:
 | Graph state isolation | Complete — each invocation has its own state object |
 
 > **Note**: The HTTP response is still the primary data source for UI rendering. WebSocket events are currently wired for loading indicators. Connecting them to the `DynamicRendererComponent` for progressive rendering is the next architectural enhancement.
+
+---
+
+## 22. Hybrid Compute Layer (ReactiveEngine + StateManager)
+
+### Overview
+
+The reactive compute layer sits between the agent pipeline and the memory layer. It has two responsibilities:
+
+1. **StateManager** — per-session in-process state store so every compute function always has the latest upstream data
+2. **ReactiveEngine** — listens for upstream events and automatically re-computes downstream agents without any LLM calls
+
+### StateManager
+
+**File**: `backend/engine/state.manager.js`
+
+A singleton `Map<sessionId → state>` that holds `{ profile, simulation, portfolio, risk, tax, cashflow }` per session.
+
+| Method | Description |
+|---|---|
+| `get(sessionId)` | Returns current state (empty state shape if not found) |
+| `update(sessionId, patch)` | Atomic merge — only keys in patch are overwritten |
+| `seed(sessionId, session)` | Populate from a Redis session object on first load |
+| `clear(sessionId)` | Remove all state (call on session expiry) |
+
+**Why it exists**: Compute functions need the complete current state to re-compute downstream values. Without StateManager, `recomputeRisk()` would not know the current portfolio after a glide-path shift.
+
+**Usage in routes**:
+```javascript
+// chat.route.js + upload.route.js — after loading Redis session
+reactiveEngine.seedFromSession(sessionId, session);
+```
+
+### ReactiveEngine
+
+**File**: `backend/engine/reactive.engine.js`
+
+Attaches listeners to `AppEventEmitter` at startup and executes deterministic cascades when upstream data changes.
+
+#### Dependency Map
+
+```
+PROFILE_UPDATED    → [simulation, portfolio, risk]
+TAX_UPDATED        → [simulation]
+CASHFLOW_UPDATED   → [simulation]
+SIMULATION_UPDATED → [portfolio, risk]
+PORTFOLIO_UPDATED  → [risk]
+```
+
+#### Cascade Execution Rules
+
+1. Agents in the cascade run **sequentially** — each sees the updated state from the previous step
+2. Each recompute calls the pure-function compute module directly (no LLM, no chain invocation)
+3. Results are written to **both StateManager and Redis** for durability
+4. After each recompute a downstream event is emitted → WS clients receive real-time updates
+
+#### What is preserved vs recomputed
+
+| Field | ReactiveEngine action |
+|---|---|
+| Simulation numbers (projectedSavings, gap, milestones) | **Recomputed** from profile |
+| Simulation `summary` text | **Preserved** — not re-generated without LLM |
+| Portfolio allocation % | **Recomputed** from profile + simulation |
+| Portfolio `rationale` text | **Preserved** — not re-generated without LLM |
+| Risk score + stress tests | **Recomputed** from profile + portfolio + simulation |
+| Risk `factors[]` + `mitigation_steps[]` text | **Preserved** — not re-generated without LLM |
+
+#### E2E Example: User updates income (PROFILE_UPDATED fires)
+
+```
+1. ProfileAgent saves new profile to Redis
+2. chat.route.js emits PROFILE_UPDATED
+3. ReactiveEngine.cascade("session-123", PROFILE_UPDATED, [simulation, portfolio, risk])
+
+   Step A: recomputeSimulation(state)
+     → calculateRetirementProjection(newProfile)
+     → new projected_savings, milestones, savings_gap
+     → StateManager.update({ simulation: newSim })
+     → Redis.updateSession({ simulation: newSim })
+     → emit SIMULATION_UPDATED → WS client sees updated chart
+
+   Step B: recomputePortfolio(state)   ← uses updated simulation
+     → computePortfolioAllocation(newProfile, newSim)
+     → new allocation, strategy, expected_return
+     → StateManager.update({ portfolio: newPortfolio })
+     → Redis.updateSession({ portfolio: newPortfolio })
+     → emit PORTFOLIO_UPDATED → WS client sees updated allocation
+
+   Step C: recomputeRisk(state)        ← uses updated simulation + portfolio
+     → computeRiskScore(newProfile, newPortfolio, newSim)
+     → new overall_risk_score, risk_level, stress_tests
+     → StateManager.update({ risk: newRisk })
+     → Redis.updateSession({ risk: newRisk })
+     → emit RISK_UPDATED → WS client sees updated risk dashboard
+```
+
+Total LLM calls for this cascade: **0**.
+
+---
+
+## 23. Pure-Function Compute Modules
+
+### financial.calculator.js
+
+**File**: `backend/utils/financial.calculator.js`
+
+Produces retirement projection numbers using compound interest math.
+
+| Output | Formula |
+|---|---|
+| `projected_savings_at_retirement` | `FV_lump_sum(savings, 7%, n) + FV_annuity(annual_savings, 7%, n)` |
+| `required_savings_at_retirement` | `annual_expenses × 25` (4% SWR / 25× rule) |
+| `savings_gap` | `max(0, required − projected)` |
+| `monthly_shortfall_or_surplus` | `(projected × 4%) / 12 − monthly_expenses` |
+| `years_of_runway` | `projected / annual_expenses` |
+| `milestones[3]` | Savings at 1/3, 2/3, and full years-to-retirement intervals |
+
+**Assumptions** (documented in code):
+- Annual return: 7% (long-term S&P 500 average, inflation-adjusted)
+- Safe Withdrawal Rate: 4% (25× rule)
+
+---
+
+### portfolio.compute.js
+
+**File**: `backend/agents/compute/portfolio.compute.js`
+
+Produces asset allocation, strategy label, expected return, and rebalance frequency.
+
+**Input**: `profile.risk_tolerance`, `profile.age`, `profile.retirement_age`
+
+**Algorithm**:
+```
+1. Look up base allocation from risk_tolerance → BASE_ALLOCATIONS map
+2. If years_to_retirement ≤ 10: shift equities → bonds (glide path)
+3. If years_to_retirement ≤ 5:  shift further (near-retirement path)
+4. Normalise to exactly 100%
+5. expected_return = (equities/100) × 9% + (bonds/100) × 3%
+6. strategy = aggressive | balanced | conservative | very_conservative
+7. rebalance_frequency = quarterly (≤5 yrs) | annually
+```
+
+| Risk Tolerance | Equities | Bonds | Real Estate | Cash |
+|---|---|---|---|---|
+| `low` | 30% | 55% | 5% | 10% |
+| `medium` | 60% | 30% | 5% | 5% |
+| `high` | 80% | 12% | 5% | 3% |
+
+---
+
+### risk.compute.js
+
+**File**: `backend/agents/compute/risk.compute.js`
+
+Produces risk score, risk level, and stress test estimates.
+
+**Input**: `profile.age`, `profile.retirement_age`, `portfolio.allocation`, `simulation.savings_gap`, `simulation.projected_savings_at_retirement`
+
+**Scoring factors**:
+
+| Factor | Score 0 | Score 1 | Score 2 | Score 3 | Weight |
+|---|---|---|---|---|---|
+| Equity concentration | — | equity < 55% | equity 55–74% | equity ≥ 75% | ×2 |
+| Time horizon | > 20 yrs | 11–20 yrs | 6–10 yrs | ≤ 5 yrs | ×2 |
+| Savings gap | $0 | > $0 | ≥ $100k | ≥ $500k | ×3 |
+
+```
+raw_score = equity×2 + time×2 + gap×3         (max = 21)
+score     = round( raw_score / 21 × 10 )       (range: 1–10)
+risk_level:   1–3 → low, 4–5 → medium, 6–7 → high, 8–10 → very high
+```
+
+**Stress tests**:
+```
+market_crash_20pct_impact = -(projected_savings × equity% × 0.20)
+inflation_spike_impact    = -(projected_savings × 0.05)
+```
+
+All values are integers in dollars. The LLM receives these as context when writing factor descriptions but cannot change them.

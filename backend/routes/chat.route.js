@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { buildFinancialGraph } from '../langgraph/graph.js';
-import { redisMemory, vectorStore, eventEmitter } from '../services.js';
+import { redisMemory, vectorStore, eventEmitter, reactiveEngine } from '../services.js';
 import { MarkdownMemory } from '../memory/markdown.memory.js';
 import { log } from '../logger.js';
 
@@ -24,8 +24,9 @@ chatRoute.post('/chat', async (req, res) => {
   log.route(`  message: "${message.slice(0, 100)}${message.length > 100 ? '...' : ''}"`);
 
   try {
-    // 1. Load session memory
+    // 1. Load session memory + seed reactive engine state
     const session = (await redisMemory.getSession(sessionId)) || {};
+    reactiveEngine.seedFromSession(sessionId, session);
     const conversationHistory = await redisMemory.getConversationString(sessionId);
     const docInsights = session.documentInsights || {};
     log.route(`  session loaded | profile: ${!!session.profile} | docInsights: [${Object.keys(docInsights).join(', ')||'none'}] | history: ${conversationHistory.split('\n').filter(Boolean).length} msgs`);

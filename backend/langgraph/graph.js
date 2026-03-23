@@ -148,10 +148,11 @@ async function runPortfolio(state) {
 
 async function runRisk(state) {
   const start = Date.now();
-  const profile = state.profile ?? DEFAULT_PROFILE;
-  const portfolio = state.portfolio ?? DEFAULT_PORTFOLIO;
+  const profile    = state.profile    ?? DEFAULT_PROFILE;
+  const portfolio  = state.portfolio  ?? DEFAULT_PORTFOLIO;
+  const simulation = state.simulation ?? DEFAULT_SIMULATION;
   log.graph(`▶ node_risk START | strategy=${portfolio.strategy}`);
-  const risk = await riskAgent.run(profile, portfolio);
+  const risk = await riskAgent.run(profile, portfolio, simulation);
   const ms = Date.now() - start;
   log.graph(`✔ node_risk DONE (${ms}ms) | score=${risk.overall_risk_score}/10 | level=${risk.risk_level}`);
   (risk.factors || []).forEach((f) => log.graph(`  Factor: ${f.factor} [${f.impact}]`));

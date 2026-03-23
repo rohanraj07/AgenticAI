@@ -97,55 +97,64 @@ Respond ONLY with valid JSON:
 }}
 `);
 
-// ── Portfolio ─────────────────────────────────────────────────────────────────
-export const portfolioPrompt = PromptTemplate.fromTemplate(`
-You are the Portfolio Agent. Recommend an investment allocation.
+// ── Portfolio Rationale ───────────────────────────────────────────────────────
+// NOTE: All allocation numbers are pre-calculated by portfolio.compute.js.
+// The LLM only writes the rationale text — it does NOT determine any numbers.
+export const portfolioRationalePrompt = PromptTemplate.fromTemplate(`
+You are the Portfolio Agent. The investment allocation has already been calculated for you.
+Your ONLY job is to write a 2-3 sentence plain English rationale explaining WHY this allocation
+makes sense for this specific user. DO NOT suggest different numbers or question the allocation.
 
-Profile:
+Pre-calculated allocation:
+{allocation}
+
+Strategy: {strategy}
+Expected annual return: {expected_return}%
+
+User profile:
 {profile}
 
-Simulation:
+Simulation context:
 {simulation}
 
-Risk tolerance: {riskTolerance}
+Write a 2-3 sentence rationale that:
+1. Explains why this strategy fits the user's risk tolerance and timeline
+2. Mentions the glide path if relevant (near retirement = more bonds)
+3. Is direct, friendly, and jargon-free
 
-Respond ONLY with valid JSON:
-{{
-  "allocation": [
-    {{"asset": "Equities", "percent": 0}},
-    {{"asset": "Bonds", "percent": 0}},
-    {{"asset": "Real Estate", "percent": 0}},
-    {{"asset": "Cash", "percent": 0}}
-  ],
-  "strategy": "conservative|balanced|aggressive",
-  "expected_annual_return_percent": 0,
-  "rebalance_frequency": "quarterly|annually",
-  "rationale": "..."
-}}
+Respond with ONLY the rationale text — no JSON, no headers, just plain sentences.
 `);
 
-// ── Risk ──────────────────────────────────────────────────────────────────────
-export const riskPrompt = PromptTemplate.fromTemplate(`
-You are the Risk Agent. Score and explain financial risk.
+// ── Risk Narrative ────────────────────────────────────────────────────────────
+// NOTE: Risk score and stress test numbers are pre-calculated by risk.compute.js.
+// The LLM only writes factor descriptions and mitigation steps — no numbers.
+export const riskNarrativePrompt = PromptTemplate.fromTemplate(`
+You are the Risk Agent. The risk score has already been calculated for you.
+Your ONLY job is to write clear descriptions for each risk factor and suggest mitigation steps.
+DO NOT recalculate or change the risk score ({risk_score}/10) or risk level ({risk_level}).
 
-Profile:
+Pre-calculated risk inputs:
+- Risk score: {risk_score}/10
+- Risk level: {risk_level}
+- Equity allocation: {equity_pct}%
+- Years to retirement: {years_to_retire}
+- Savings gap: {savings_gap}
+
+User profile:
 {profile}
 
 Portfolio:
 {portfolio}
 
+Write factor descriptions for the 2-3 most relevant risk factors and 2-3 actionable mitigation steps.
+
 Respond ONLY with valid JSON:
 {{
-  "overall_risk_score": 0,
-  "risk_level": "low|medium|high|very high",
   "factors": [
-    {{"factor": "Market Volatility", "impact": "high", "description": "..."}}
+    {{"factor": "Market Volatility", "impact": "high|medium|low", "description": "1-sentence explanation referencing the user's actual equity % and timeline"}},
+    {{"factor": "Time Horizon Risk", "impact": "high|medium|low", "description": "1-sentence explanation referencing actual years to retirement"}}
   ],
-  "mitigation_steps": ["Increase emergency fund to 6 months expenses", "Diversify equity holdings across sectors"],
-  "stress_test": {{
-    "market_crash_20pct_impact": 0,
-    "inflation_spike_impact": 0
-  }}
+  "mitigation_steps": ["Specific action 1", "Specific action 2", "Specific action 3"]
 }}
 
 IMPORTANT: mitigation_steps must be a flat array of plain strings — no nested objects.

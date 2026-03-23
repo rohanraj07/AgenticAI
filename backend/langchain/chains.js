@@ -5,8 +5,8 @@ import {
   plannerPrompt,
   profilePrompt,
   simulationPrompt,
-  portfolioPrompt,
-  riskPrompt,
+  portfolioRationalePrompt,
+  riskNarrativePrompt,
   explanationPrompt,
   documentIngestionPrompt,
   taxPrompt,
@@ -34,14 +34,16 @@ export const simulationChain = RunnableSequence.from([
   jsonParser,
 ]);
 
-export const portfolioChain = RunnableSequence.from([
-  portfolioPrompt,
+// Rationale-only chain — LLM writes plain text, not JSON
+export const portfolioRationaleChain = RunnableSequence.from([
+  portfolioRationalePrompt,
   llm,
-  jsonParser,
+  stringParser,
 ]);
 
-export const riskChain = RunnableSequence.from([
-  riskPrompt,
+// Narrative-only chain — LLM writes factor descriptions + mitigation steps JSON
+export const riskNarrativeChain = RunnableSequence.from([
+  riskNarrativePrompt,
   llm,
   jsonParser,
 ]);
