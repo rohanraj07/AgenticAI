@@ -1,142 +1,209 @@
 # How It Works — AI Financial Planner
 
-> "A state-driven deterministic financial system with an AI interface."
+> "A reactive, deterministic financial engine with an AI orchestration layer."
+> Version: v3 — Priority event queue · Conflict resolution · Partial/Full recompute · A2UI v2
 
 ---
 
 ## The Core Idea
 
-Most AI financial tools are LLM-driven — the AI decides everything, including the numbers. This system is different:
+Most AI financial tools let the LLM do everything — numbers, decisions, layout. This system draws a hard boundary:
 
 ```
-WRONG approach (LLM-driven):
+WRONG (LLM-driven):
   User: "Can I retire at 55?"
-  LLM: "Sure, with $500k you'll need $200k/yr, let me calculate... you need $5M."
-  ← LLM invented those numbers. They change every run. They may be wrong.
+  LLM: "Sure, with $500k you need $5M." ← hallucinated, changes every run
 
-THIS system (state-driven):
-  User: "Can I retire at 55?"
+THIS system (deterministic engine + AI interface):
   calculator.js: FV = $200k × (1.07)^20 + $34k × ((1.07)^20 - 1)/0.07 = $1,203,847
-  LLM: "Based on your projected $1,203,847 in savings..."
-  ← Numbers are deterministic. LLM only writes the sentence around them.
+  LLM: "Based on your projected $1,203,847 in savings..." ← wraps real numbers only
 ```
 
-**The LLM is the interface. Math is the engine.**
+**The LLM is the interface. Math is the engine. Code is the orchestrator.**
 
 ---
 
-## The Three Patterns
+## The Five Patterns
 
 ### Pattern 1 — State-Driven Execution
 
-The system maintains a **single source of truth** per session:
+A single versioned source of truth per session:
 
 ```javascript
 state = {
   profile:    { age: 35, income: 80000, savings: 200000, ... },
   simulation: { projected_savings: 1203847, can_retire: true, ... },
-  portfolio:  { allocation: [{Equities:60},{Bonds:30},...], strategy: "balanced", ... },
+  portfolio:  { allocation: [{Equities:60},{Bonds:30},...], strategy: "balanced" },
   risk:       { overall_risk_score: 5, risk_level: "medium", ... },
-  tax:        { tax_efficiency_score: 7, optimization_strategies: [...], ... },
-  cashflow:   { budget_health: "good", recommendations: [...], ... }
+  tax:        { tax_efficiency_score: 7, optimization_strategies: [...] },
+  cashflow:   { budget_health: "good", recommendations: [...] },
+  uiContext:  [...],   // A2UI v2 schema — last rendered panels
+  _version:   14,      // increments on every update — enables stale-check on client
 }
 ```
 
-All agents read from this state. All agents write back to it. There is no other truth.
+This lives in:
+- **StateManager** — in-process (ReactiveEngine uses this for instant access, O(1) read)
+- **Redis** — durable (persists across requests, TTL 1 hour, includes `_version`)
+- **Markdown** — human-readable context injected into LLM prompts
 
-This state lives in:
-- **StateManager** — in-process (ReactiveEngine uses this for instant access)
-- **Redis** — durable (persists across requests, TTL 1 hour)
-- **Markdown** — human-readable (injected into LLM prompts as context)
+`_version` is incremented by `StateManager.update()` on every patch. The client can reject A2UI components whose `version < lastSeenVersion` to prevent stale renders.
 
 ---
 
-### Pattern 2 — Reactive Consistency
+### Pattern 2 — Priority Event Queue
 
-When any upstream value changes, downstream agents **automatically recompute**. The system, not the LLM, guarantees this.
+Events are not treated equally. High-urgency events (profile changes) pre-empt lower-urgency ones.
 
 ```
-PROFILE_UPDATED fires (e.g. user shares new income)
+Priority Levels:
+  HIGH   (1) — PROFILE_UPDATED
+  MEDIUM (2) — TAX_UPDATED, CASHFLOW_UPDATED, PORTFOLIO_UPDATED, SIMULATION_UPDATED
+  LOW    (3) — EXPLANATION_READY, AGENT_STARTED, AGENT_COMPLETED
+
+Deduplication (coalescing):
+  3x PROFILE_UPDATED for same session → merged into 1 entry
+  payload shallow-merged; only updatedAt refreshed; no duplicate cascade
+
+Queue behaviour:
+  If cascade already running for session → new event enqueued (not dropped)
+  After cascade ends → drain queue HIGH-first, then MEDIUM, then LOW
+```
+
+This prevents cascades from interleaving and from producing inconsistent intermediate states.
+
+---
+
+### Pattern 3 — Reactive Consistency (Full vs Partial Recompute)
+
+When upstream data changes, downstream agents recompute automatically. The system, not the LLM, guarantees this.
+
+**Recompute type decision table:**
+
+| Event | Recompute Type | Agents Triggered | Reason |
+|-------|---------------|-----------------|--------|
+| `PROFILE_UPDATED` | **FULL** | simulation → portfolio → risk | Income/age change affects everything |
+| `TAX_UPDATED` | **PARTIAL** | simulation only | Tax signals adjust effective savings rate |
+| `CASHFLOW_UPDATED` | **PARTIAL** | simulation only | Spending changes monthly surplus |
+| `SIMULATION_UPDATED` | **PARTIAL** | portfolio → risk | New gap affects allocation and score |
+| `PORTFOLIO_UPDATED` | **PARTIAL** | risk only | Equity % change → risk score change |
+
+```
+PROFILE_UPDATED fires (FULL cascade)
          │
          ▼
-ReactiveEngine reads dependency map:
-  PROFILE_UPDATED → [simulation, portfolio, risk]
-         │
-         ├── recomputeSimulation(state)
-         │     calculateRetirementProjection(newProfile)
-         │     → new projected_savings, savings_gap, milestones
-         │     → StateManager updated, Redis updated, SIMULATION_UPDATED emitted
-         │
-         ├── recomputePortfolio(state)          ← sees updated simulation
-         │     computePortfolioAllocation(newProfile, newSimulation)
-         │     → new allocation, strategy, expected_return
-         │     → StateManager updated, Redis updated, PORTFOLIO_UPDATED emitted
-         │
-         └── recomputeRisk(state)               ← sees updated simulation + portfolio
-               computeRiskScore(newProfile, newPortfolio, newSimulation)
-               → new score, risk_level, stress_tests
-               → StateManager updated, Redis updated, RISK_UPDATED emitted
+ReactiveEngine._runCascade()
+  ├── recomputeSimulation(state)    ← financial.calculator.js, ~1ms, no LLM
+  │     → new projected_savings, savings_gap, milestones
+  │     → StateManager.update({simulation})  _version++
+  │     → Redis.updateSession({simulation})
+  │     → emit SIMULATION_UPDATED → WebSocket push
+  │
+  ├── recomputePortfolio(state)     ← sees updated simulation
+  │     computePortfolioAllocation(profile, newSimulation)
+  │     → StateManager.update({portfolio})  _version++
+  │     → Redis.updateSession({portfolio})
+  │     → emit PORTFOLIO_UPDATED → WebSocket push
+  │
+  └── recomputeRisk(state)          ← sees updated simulation + portfolio
+        computeRiskScore(profile, newPortfolio, newSimulation)
+        → StateManager.update({risk})  _version++
+        → Redis.updateSession({risk})
+        → emit RISK_UPDATED → WebSocket push
+
+Zero LLM calls. Zero manual triggers. Guaranteed consistency.
 ```
-
-**Zero LLM calls. Zero manual triggers. Guaranteed consistency.**
-
-This answers the critical question: "If income changes, can you guarantee simulation reruns?"
-**Yes — it is enforced by code in `reactive.engine.js`, not by any prompt.**
 
 ---
 
-### Pattern 3 — A2UI v2 (Agent-to-UI Orchestration)
+### Pattern 4 — Conflict Resolution
 
-The server answers four questions for every UI panel. The frontend renders what it is told.
+When the same field arrives from multiple sources, a deterministic resolver decides the winner.
 
-| Question | Answered by |
-|----------|------------|
-| **WHAT** to show | Planner (LLM intent classification) |
-| **WHY** it is shown | Planner `panel_reason` → UIComposer `insight.reason` |
-| **HOW** to show it | UIComposer: `layout`, `priority`, `expandOnLoad`, `interactive` |
-| **WHEN** to refresh | UIComposer: `trigger` (WebSocket event name) |
+**Source precedence (highest wins):**
 
-```
-Planner LLM output:
-  plan.ui = [
-    { type: "simulation_chart", panel_reason: "User asked about retirement feasibility" },
-    { type: "tax_panel",        panel_reason: "Tax document signals detected" }
-  ]
-         │
-UIComposer (deterministic — no LLM):
-  composeUI(plan, state) →
-  [
-    {
-      id: "simulation_chart-0",
-      type: "simulation_chart",
-      data: { can_retire_at_target: true, projected_savings: 2865086, ... },
-      meta: { priority: "high", layout: "full_width", trigger: "SIMULATION_UPDATED",
-              behavior: { expandOnLoad: true, interactive: true } },
-      insight: { reason: "User asked about retirement feasibility",
-                 summary: "On track — $2.86M projected vs $1.05M required",
-                 confidence: 0.9 },
-      actions: [{ label: "Adjust retirement age", action: "EDIT_RETIREMENT_AGE" }]
-    },
-    {
-      id: "tax_panel-1",
-      type: "tax_panel",
-      data: { tax_efficiency_score: 7, tax_bracket: "22%", ... },
-      meta: { priority: "high", layout: "full_width", trigger: "TAX_UPDATED",
-              behavior: { expandOnLoad: true, interactive: false } },
-      insight: { reason: "Tax document signals detected",
-                 summary: "22% bracket — efficiency 7/10, 3 strategies identified",
-                 confidence: 0.85 },
-      actions: [{ label: "View all strategies", action: "EXPAND_TAX_STRATEGIES" }]
-    }
-  ]
-         │
-Angular DynamicRendererComponent:
-  renders each comp using comp.data (pre-fetched, no re-fetch needed)
-  shows comp.insight.reason as "Why am I seeing this?" per panel
-  uiContext persisted to Redis — survives page refresh
+| Source | Rank | Example |
+|--------|------|---------|
+| `document_extracted` | 4 | Income range from uploaded W-2 |
+| `user_stated` | 3 | "My income is $80k" typed in chat |
+| `inferred` | 2 | LLM extracted from vague message |
+| `default` | 1 | System fallback values |
+
+**Tie-breaking within same rank:**
+1. Higher `confidence` score wins
+2. More recent `timestamp` wins
+
+```javascript
+// ConflictResolver.resolveField("income", [
+//   { value: 80000, source: "inferred",           confidence: 0.5, timestamp: T-60s },
+//   { value: 95000, source: "document_extracted",  confidence: 1.0, timestamp: T-now }
+// ])
+// → { value: 95000, source: "document_extracted" }  ← document wins
 ```
 
-**Different users see different UI. New panels, layouts, and actions are server-side changes only — zero frontend deploys.**
+**mergeProfiles** applies this field-by-field, returning a clean merged object. Used in ProfileAgent when a new upload provides additional data.
+
+**scoreDataQuality** returns 0.0–1.0:
+- -1/7 per missing field from full profile schema
+- Extra -0.15 for each missing critical field (`income`, `retirement_age`)
+- Score surfaced in `insight.confidence` on A2UI components
+
+---
+
+### Pattern 5 — A2UI v2 (Agent-to-UI Orchestration)
+
+The server answers four questions per panel. The frontend renders what it is told.
+
+| Question | Field | Who answers |
+|----------|-------|-------------|
+| **WHAT** to show | `type` | Planner (LLM) |
+| **WHY** it is shown | `insight.reason` + `insight.summary` | Planner `panel_reason` → UIComposer |
+| **HOW** to show it | `meta.priority`, `meta.layout`, `meta.behavior` | UIComposer registry |
+| **WHEN** to refresh | `meta.trigger` | UIComposer registry |
+
+**Loading state (skeleton panels):**
+
+```
+1. Planner decides → ui[] list with panel_reasons
+2. composeLoadingState(plan) → A2UI components with loading:true, data:{}, confidence:0
+   └─ Frontend renders skeletons immediately (no flicker)
+3. Agents run (math first, then LLM narrative)
+4. composeUI(plan, state) → A2UI components with loading:false, data:computed, version:N
+   └─ Frontend replaces skeletons with real data (atomic swap by version)
+```
+
+**Full A2UI v2 component shape:**
+
+```javascript
+{
+  id:      "simulation_chart-0",
+  type:    "simulation_chart",
+  loading: false,             // ← true during skeleton phase
+  version: 14,               // ← _version at time of composition; client rejects stale
+  data:    {                  // ← pre-fetched state slice, no extra fetch needed
+    can_retire_at_target: true,
+    projected_savings_at_retirement: 2865086,
+    // ...
+  },
+  meta: {
+    priority:    "high",
+    layout:      "full_width",
+    position:    0,
+    trigger:     "SIMULATION_UPDATED",   // ← WS event that refreshes this panel
+    stage:       "summary",
+    behavior:    { expandOnLoad: true, interactive: true }
+  },
+  insight: {
+    reason:     "User asked about retirement feasibility",  // WHY
+    summary:    "On track — $2.86M projected vs $1.05M required",  // WHAT
+    confidence: 0.9
+  },
+  actions: [
+    { label: "Adjust retirement age", action: "EDIT_RETIREMENT_AGE" },
+    { label: "Change savings rate",   action: "EDIT_SAVINGS_RATE"   }
+  ]
+}
+```
 
 ---
 
@@ -146,8 +213,8 @@ Angular DynamicRendererComponent:
 
 ```
 POST /api/chat { message: "Can I retire at 55?", sessionId: null }
-  → New sessionId generated
-  → Load Redis session: {} (empty)
+  → New sessionId generated (UUID)
+  → Load Redis session: {} (empty — first request)
   → reactiveEngine.seedFromSession(sessionId, {})
   → RAG context: "" (no prior history)
 ```
@@ -155,63 +222,60 @@ POST /api/chat { message: "Can I retire at 55?", sessionId: null }
 ### Step 2 — Planner (LLM: intent classification only)
 
 ```
-Input: message + sessionContext + { profileExists: false, simulationExists: false }
-
-LLM output:
+LLM classifies intent:
 {
   intent: "Retirement feasibility check",
   agents: ["profile", "simulation", "explanation"],
-  ui: [profile_summary, simulation_chart, explanation_panel],
+  ui: [
+    { type: "profile_summary",   panel_reason: "Profile needed to personalise projections" },
+    { type: "simulation_chart",  panel_reason: "User asked about retirement feasibility" },
+    { type: "explanation_panel", panel_reason: "Summarises findings in plain English" }
+  ],
   confidence: "high"
 }
-```
 
-The planner classifies intent. It does not calculate anything.
+composeLoadingState(plan) → 3 skeleton components sent to frontend immediately
+```
 
 ### Step 3 — Profile (LLM: entity extraction)
 
 ```
 LLM extracts from natural language:
 { age: 30, income: 80000, savings: 50000, retirement_age: 55, risk_tolerance: "medium" }
+
+ConflictResolver.scoreDataQuality(profile) → 0.71 (missing goals, monthly_expenses)
+StateManager.update({profile})  _version: 1
 ```
 
 ### Step 4 — Simulation (Math first, then LLM)
 
 ```
-calculator.js (deterministic):
-  years_to_retirement = 55 - 30 = 25
-  monthly_savings = (80000/12) - 3500 = $3,167/mo
-  annual_savings = $38,000/yr
-
+calculator.js (deterministic, ~1ms):
   projected_savings = 50000 × (1.07)^25 + 38000 × ((1.07)^25 - 1)/0.07
-                    = $271,372 + $2,593,714 = $2,865,086  ← deterministic number
+                    = $2,865,086  ← same number every run for same inputs
 
-  required_savings = 3500 × 12 × 25 = $1,050,000  (25x rule)
-  can_retire = true (projected > required)
-  monthly_surplus = ($2,865,086 × 4%) / 12 - $3,500 = $6,050/mo
+LLM (simulationChain, ~800ms):
+  Receives pre-computed numbers. Writes: { summary, milestone_notes }
+  Cannot change $2,865,086 — it's in the prompt as a literal
 
-LLM (simulationChain):
-  Receives: pre-computed numbers
-  Returns: { summary: "You are well on track...", milestone_notes: [...] }
-           ← cannot change $2,865,086 or any other number
+StateManager.update({simulation})  _version: 2
+emit SIMULATION_UPDATED → WebSocket → Angular simulation chart renders
 ```
 
 ### Step 5 — Explanation (LLM: narrative synthesis)
 
 ```
-Receives: profile + simulation (computed)
-Returns: "Based on your current income of $80k and $50k in savings,
-          retiring at 55 is achievable. Your projected $2.86M far exceeds
-          the $1.05M required..."
+Receives profile + simulation (pre-computed)
+Returns: "Retiring at 55 is achievable. Your projected $2.86M far exceeds..."
+emit EXPLANATION_READY → WebSocket
 ```
 
-### Step 6 — Persist + Emit
+### Step 6 — Compose A2UI v2 + Persist
 
 ```
-Redis: { profile, simulation, messages }
-StateManager: { profile, simulation }
-PROFILE_UPDATED → ReactiveEngine (no recompute needed — simulation already ran)
-SIMULATION_UPDATED → WebSocket → Angular updates simulation chart
+composeUI(plan, {profile, simulation, ...}) → richUI (version:2, loading:false)
+Redis.updateSession({..., uiContext: richUI})
+HTTP response: { sessionId, message, ui: richUI, data, trace }
 ```
 
 ---
@@ -221,145 +285,136 @@ SIMULATION_UPDATED → WebSocket → Angular updates simulation chart
 ### Step 1 — Document Ingestion (trust-by-design)
 
 ```
-POST /api/upload (W2.txt in-memory buffer, never on disk)
-  │
-  ▼
-DocumentIngestionAgent:
-  LLM classifies: "tax_document" (high confidence)
-  LLM extracts raw_values (ephemeral, in-memory only):
+POST /api/upload (W2.txt, in-memory buffer, NEVER on disk)
+  LLM: classify → "tax_document" (high confidence)
+  LLM: extract raw_values (ephemeral, local variable only):
     { grossIncome: 145000, effectiveTaxRate: 18.5, marginalRate: 22 }
   PII Sanitizer:
     145000 → income_range: "UPPER_MIDDLE"
     18.5%  → effective_rate: "18.5%"
-  raw_values DISCARDED ← never stored anywhere
+  raw_values DISCARDED ← never reaches Redis/disk
   taxInsights = { income_range, tax_bracket, effective_rate, deductions_level }
 ```
 
-### Step 2 — Routing (deterministic, not LLM)
+### Step 2 — Conflict Resolution (profile merge)
 
 ```
-routeDocument("tax_document")
-  → { agents: [profile, tax, simulation, explanation], ui: [...] }
-  ← ROUTING_MAP lookup, no LLM involved
+Existing profile: { income: 80000, source: "user_stated" }
+Document signals: { income_range: "UPPER_MIDDLE", source: "document_extracted" }
+
+ConflictResolver.mergeProfiles(existingProfile, incomingData, "document_extracted")
+  → document_extracted rank (4) > user_stated rank (3)
+  → document-derived income range replaces inferred value
+  → profile updated with higher-confidence data
 ```
 
-### Step 3 — Pipeline (planner skipped — plan pre-seeded)
+### Step 3 — Routing (deterministic, not LLM)
 
 ```
-node_profile   → profile extracted from document context
-node_tax       → tax analysis from taxInsights (22% bracket, MODERATE deductions)
-               sub-agents: parseTaxSignals → analyzeDeductions (pure fn)
-                           → taxChain (LLM: strategy text) → rankStrategies (pure fn)
-node_simulation → calculator.js projection with real profile
-node_explanation → narrative referencing all computed state
+ROUTING_MAP["tax_document"] → { agents: [profile, tax, simulation, explanation] }
+No LLM involved in routing decision
 ```
 
-### Step 4 — Session updated
+### Step 4 — Pipeline runs, then PROFILE_UPDATED fires
 
 ```
-Redis: { profile, simulation, tax, documentInsights: { tax: taxInsights } }
-StateManager: seeded with full session state
+PROFILE_UPDATED (priority: HIGH) → ReactiveEngine
+  → FULL cascade: simulation → portfolio → risk (all ~3ms, zero LLM)
+  → StateManager._version increments 3×
+  → WebSocket pushes all three updates to Angular client
 ```
 
-### Step 5 — Follow-up chat "Tell me more about my taxes"
+### Step 5 — A2UI v2 with tax panel
 
 ```
-Redis loads session → taxInsights available
-Planner: "tax" in agents
-node_tax: re-runs with persisted taxInsights
-No document re-upload needed
+composeUI(syntheticPlan, state) →
+  tax_panel:         { data: tax,        insight: { summary: "22% bracket — 7/10 efficiency" } }
+  simulation_chart:  { data: simulation, insight: { summary: "On track — $2.86M projected" } }
+  explanation_panel: { data: {},         insight: { summary: "Personalised financial analysis" } }
 ```
 
 ---
 
-## The LLM Boundary (What the LLM Can and Cannot Do)
+## The LLM Boundary
 
 ### LLM CAN
 
 ```
-✅ Classify intent: "user wants retirement projection"
-✅ Extract profile from text: "age: 35, income: 80000"
+✅ Classify intent → "user wants retirement projection"
+✅ Extract profile from text → { age: 35, income: 80000 }
 ✅ Write narrative summary (using pre-computed numbers)
 ✅ Write portfolio rationale (using pre-computed allocation)
 ✅ Write risk factor descriptions (using pre-computed score)
 ✅ Suggest tax optimization strategies (using abstracted signals)
-✅ Write final explanation
+✅ Write final explanation referencing computed state
 ```
 
 ### LLM CANNOT
 
 ```
-❌ Compute savings projections     → financial.calculator.js does this
-❌ Decide allocation percentages   → portfolio.compute.js does this
-❌ Set risk score                  → risk.compute.js does this
-❌ Calculate stress test amounts   → risk.compute.js does this
-❌ Trigger recomputation           → ReactiveEngine dependency map does this
-❌ Skip required agent steps       → LangGraph routing + guardrails prevent this
-❌ Access or store raw PII         → PII sanitizer runs before any chain invocation
+❌ Compute savings projections       → financial.calculator.js does this
+❌ Decide allocation percentages     → portfolio.compute.js does this
+❌ Set risk score                    → risk.compute.js does this
+❌ Calculate stress test amounts     → risk.compute.js does this
+❌ Trigger or skip recomputation     → ReactiveEngine dependency map does this
+❌ Resolve conflicting data          → ConflictResolver precedence rules do this
+❌ Decide UI layout or priority      → UIComposer component registry does this
+❌ Store or access raw PII           → PII sanitizer runs before any chain invocation
 ```
 
 **Why this matters:** If the LLM hallucinates, you get a poorly worded sentence. You never get a wrong projected savings number — because the LLM never computed it.
 
 ---
 
-## Dependency Graph — The Heart of the System
+## Failure Handling
 
-```javascript
-// reactive.engine.js — hardcoded, never changes at runtime
-const DEPENDENCY_MAP = {
-  PROFILE_UPDATED:    ['simulation', 'portfolio', 'risk'],
-  TAX_UPDATED:        ['simulation'],
-  CASHFLOW_UPDATED:   ['simulation'],
-  SIMULATION_UPDATED: ['portfolio', 'risk'],
-  PORTFOLIO_UPDATED:  ['risk'],
-}
-```
-
-Answering the design review questions:
-
-| Question | Answer | Mechanism |
-|----------|--------|-----------|
-| If income changes, does simulation ALWAYS rerun? | **Yes** | PROFILE_UPDATED → ReactiveEngine → recomputeSimulation() |
-| Where is the single source of truth? | **StateManager + Redis** | state = { profile, simulation, portfolio, risk, tax, cashflow } |
-| What prevents LLM from skipping steps? | **LangGraph routing + guardrails** | Pure code, not prompts |
-| Can two runs produce different numbers? | **No** | Compute functions are pure, same input → same output |
-| Who guarantees recomputation — system or LLM? | **System** | ReactiveEngine listens for events, not LLM instructions |
-
----
-
-## Trust-by-Design — What "Never Stored" Actually Means
-
-The claim "raw PII is never stored" is enforced architecturally, not by policy:
-
-```
-1. multer.memoryStorage() — file NEVER touches disk (Node.js in-memory buffer only)
-2. DocumentIngestionAgent — raw_values exist only in a local variable, discarded in same function call
-3. PII sanitizer runs synchronously before any async operation
-4. Abstracted signals are the ONLY thing passed to Redis.updateSession()
-5. LangGraph state channels never contain raw_values (they're stripped before graph.invoke())
-```
-
-The system cannot store raw PII even if a developer wanted to — the pipeline doesn't expose a path for it.
+| Failure | Behaviour |
+|---------|-----------|
+| Redis down | StateManager in-process Map used; session still works for duration of process |
+| LLM API timeout | `withFallback()` in every LangGraph node; simulation still returns deterministic numbers |
+| Cascade error | try/catch in `_runCascade`; error logged; queued events still drain |
+| Document too large | multer 5 MB limit rejects before ingestion; 400 returned |
+| PII sanitizer fails | Default safe values used; abstraction step never skipped |
+| Agent chain fails | `SAFE_DEFAULT_PLAN` used by planner; explanation agent has hardcoded fallback text |
 
 ---
 
 ## Reactive Event Flow (WebSocket)
 
-As each agent completes, events push to the Angular UI in real time:
-
 ```
 POST /api/chat
-  [0ms]    AGENT_STARTED:planner
-  [1200ms] PLANNER_DECIDED         → UI knows which panels to prepare
-  [1200ms] AGENT_STARTED:profile
-  [2100ms] PROFILE_UPDATED         → Profile panel renders
-  [2100ms] AGENT_STARTED:simulation
-  [2200ms] (ReactiveEngine also triggers — recomputes in background)
-  [3300ms] SIMULATION_UPDATED      → Simulation chart renders
-  [3300ms] AGENT_STARTED:explanation
-  [4100ms] EXPLANATION_READY       → Chat message appears
+  [0ms]    → composeLoadingState(plan) → skeleton panels sent (if implemented on client)
+  [1200ms] → PLANNER_DECIDED            — UI knows which panels to prepare
+  [1200ms] → PROFILE_UPDATED (HIGH)     — priority queue receives event
+  [1201ms] → ReactiveEngine: FULL cascade starts
+  [1203ms] → SIMULATION_UPDATED         — chart renders with real data
+  [1204ms] → PORTFOLIO_UPDATED          — portfolio renders
+  [1205ms] → RISK_UPDATED               — risk panel renders
+  [2100ms] → EXPLANATION_READY          — chat message appears
+  [2200ms] → HTTP response              — full A2UI v2 (version:N) as backup source
 
-HTTP response arrives at [4200ms] with full data as backup source.
+Users see panels populate progressively. Each A2UI component checks version before render.
 ```
 
-Users see panels appear progressively rather than waiting 4+ seconds for everything.
+---
+
+## Dependency Graph
+
+```javascript
+// reactive.engine.js — hardcoded, never changes at runtime
+const DEPENDENCY_MAP = {
+  PROFILE_UPDATED:    ['simulation', 'portfolio', 'risk'],  // FULL
+  TAX_UPDATED:        ['simulation'],                        // PARTIAL
+  CASHFLOW_UPDATED:   ['simulation'],                        // PARTIAL
+  SIMULATION_UPDATED: ['portfolio', 'risk'],                 // PARTIAL
+  PORTFOLIO_UPDATED:  ['risk'],                              // PARTIAL
+}
+```
+
+| Question | Answer | Mechanism |
+|----------|--------|-----------|
+| If income changes, does simulation ALWAYS rerun? | **Yes** | PROFILE_UPDATED → ReactiveEngine → recomputeSimulation() |
+| What if two events arrive simultaneously? | **Coalesced** | PriorityQueue deduplicates by (event, sessionId) |
+| Who resolves conflicting data from document vs chat? | **ConflictResolver** | document_extracted rank (4) beats user_stated (3) |
+| Can the UI show stale data? | **No** | `version` field on each A2UI component; client rejects version < lastSeen |
+| Who guarantees recomputation — system or LLM? | **System** | ReactiveEngine dependency map, hardcoded in JS |

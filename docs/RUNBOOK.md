@@ -298,15 +298,49 @@ Then verify manually: `FV = 200000 × (1.07)^30 + 34000 × ((1.07)^30 - 1)/0.07`
 
 The number in the log should match the formula — not vary per run.
 
-### Confirm ReactiveEngine fires
+### Confirm ReactiveEngine priority + recompute type
 
 ```bash
-# Look for in logs after any profile save:
-[ReactiveEngine] PROFILE_UPDATED → cascade=[simulation, portfolio, risk]
+# After a profile update:
+[ReactiveEngine] PROFILE_UPDATED → FULL cascade | agents=[simulation, portfolio, risk] session=abc-123
 [ReactiveEngine] ✔ simulation recomputed (2ms)
+[ReactiveEngine] ✔ portfolio recomputed (1ms)
+[ReactiveEngine] ✔ risk recomputed (1ms)
+
+# After a tax document upload:
+[ReactiveEngine] TAX_UPDATED → PARTIAL cascade | agents=[simulation] session=abc-123
+[ReactiveEngine] ✔ simulation recomputed (1ms)
 ```
 
-The 2ms time confirms deterministic math (not an LLM call, which takes seconds).
+The ms times confirm deterministic math. FULL vs PARTIAL label confirms correct cascade type.
+
+### Confirm event coalescing (PriorityQueue)
+
+```bash
+# If 3 rapid profile updates arrive while cascade is running:
+[ReactiveEngine] queued PROFILE_UPDATED (cascade in progress) session=abc-123
+[ReactiveEngine] queued PROFILE_UPDATED (cascade in progress) session=abc-123
+# Only ONE additional cascade runs after the first completes (events coalesced)
+```
+
+### Confirm ConflictResolver
+
+```bash
+# After document upload when profile already exists:
+[ConflictResolver] field="income" resolved → source=document_extracted confidence=1
+[ConflictResolver] mergeProfiles complete — source=document_extracted fields=[income, ...]
+[ConflictResolver] scoreDataQuality → 0.857
+```
+
+### Confirm StateManager versioning
+
+```bash
+[StateManager] session=abc-123 patched keys=[profile] version=3
+[StateManager] session=abc-123 patched keys=[simulation] version=4
+[StateManager] session=abc-123 patched keys=[portfolio] version=5
+# version increments on every update — check A2UI response:
+# ui[0].version === 5 (matches state._version at composition time)
+```
 
 ---
 

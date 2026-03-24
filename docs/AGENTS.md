@@ -1,6 +1,6 @@
 # Agent Reference — AI Financial Planner
 
-> Version: v2 — Hybrid deterministic compute + LLM narrative
+> Version: v3 — Hybrid deterministic compute + LLM narrative + conflict resolution + priority events
 
 ---
 
@@ -165,6 +165,25 @@ Extracts structured profile from natural language using LLM entity recognition. 
 ### Note on PII
 
 Profile numeric fields (`income`, `savings`, `monthly_expenses`) are used in-session for deterministic computation. They are held in the session Redis key. These are user-provided values, not extracted from uploaded documents (which are abstracted to range labels by DocumentIngestionAgent).
+
+### Conflict Resolution
+
+When an existing profile is updated (new chat message or document upload), the ProfileAgent uses `ConflictResolver.mergeProfiles()` to resolve field-level conflicts:
+
+```
+Existing: { income: 80000, source: "user_stated" }
+Incoming: { income_range: "UPPER_MIDDLE", source: "document_extracted" }
+
+ConflictResolver:
+  document_extracted rank (4) > user_stated rank (3)
+  → document-derived data wins
+  → profile updated with higher-authority value
+
+ConflictResolver.scoreDataQuality(mergedProfile) → 0.0–1.0
+  → surfaced as insight.confidence on A2UI panels
+```
+
+After profile merge, `PROFILE_UPDATED` (priority: HIGH) fires → ReactiveEngine FULL cascade.
 
 ---
 
@@ -495,23 +514,42 @@ Plain text (3–5 sentences), e.g.:
 
 ---
 
-## ReactiveEngine — Automatic Recomputation
+## ReactiveEngine — Automatic Recomputation (v3)
 
-The ReactiveEngine (separate from the LangGraph pipeline) listens for domain events and re-runs compute functions to keep state consistent:
+The ReactiveEngine listens for domain events and re-runs compute functions without any LLM involvement.
+
+### Recompute type decision table
+
+| Event | Priority | Recompute Type | Downstream Agents |
+|-------|----------|---------------|-------------------|
+| `PROFILE_UPDATED` | HIGH (1) | **FULL** | simulation, portfolio, risk |
+| `TAX_UPDATED` | MEDIUM (2) | PARTIAL | simulation only |
+| `CASHFLOW_UPDATED` | MEDIUM (2) | PARTIAL | simulation only |
+| `SIMULATION_UPDATED` | MEDIUM (2) | PARTIAL | portfolio, risk |
+| `PORTFOLIO_UPDATED` | MEDIUM (2) | PARTIAL | risk only |
+
+### Cascade behaviour
 
 ```javascript
-// Dependency map (hardcoded in reactive.engine.js)
-PROFILE_UPDATED    → ['simulation', 'portfolio', 'risk']
-TAX_UPDATED        → ['simulation']
-CASHFLOW_UPDATED   → ['simulation']
-SIMULATION_UPDATED → ['portfolio', 'risk']
-PORTFOLIO_UPDATED  → ['risk']
+// If cascade already running for session → event enqueued (not dropped)
+if (_pendingCascades.has(sessionId)) {
+  _queue.enqueue(event, sessionId, payload, priority)  // coalesced if duplicate
+  return
+}
+
+// Run cascade, then drain queued events for this session (HIGH-first)
+_pendingCascades.set(sessionId, event)
+await _cascade(sessionId, event, downstream, recomputeType)
+const queued = _queue.drain().filter(e => e.sessionId === sessionId)
+for (item of queued) await _cascade(...)
+_pendingCascades.delete(sessionId)
 ```
 
 When a cascade runs:
 1. Compute functions execute sequentially (each sees updated upstream state)
-2. Results written to StateManager (in-process) AND Redis (durable)
-3. Domain events emitted per recomputed agent → WebSocket push to client
-4. Existing LLM narrative (rationale, factor descriptions) is **preserved** — not regenerated
+2. `StateManager._version` increments on every agent recompute
+3. Results written to StateManager (in-process) AND Redis (durable)
+4. Domain events emitted per recomputed agent → WebSocket push to client
+5. Existing LLM narrative (rationale, factor descriptions) is **preserved** — not regenerated
 
 **Zero LLM calls in any reactive cascade.**

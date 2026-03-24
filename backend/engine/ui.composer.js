@@ -267,11 +267,73 @@ export function composeUI(plan, state = {}) {
       },
       insight: buildInsight(type, plan, state),
       actions: reg.actions,
+      version: state._version ?? 0,
     };
   });
 
   const types = components.map((c) => `${c.type}[${c.meta.priority}/${c.meta.layout}]`).join(', ');
   log.info(`[UIComposer] composed ${components.length} components: ${types}`);
+
+  return components;
+}
+
+/**
+ * Build placeholder A2UI components in loading state.
+ * Called immediately after the planner decides, before agents run.
+ * The frontend can render skeletons while the real data is being computed.
+ *
+ * @param {object}   plan          Planner output (must have a ui[] array)
+ * @param {string[]} [loadingAgents=[]]  Names of agents that are still running
+ * @returns {object[]}  A2UI v2 components with loading:true and empty data
+ */
+export function composeLoadingState(plan, loadingAgents = []) {
+  if (!plan?.ui?.length) {
+    log.warn('[UIComposer] composeLoadingState: plan.ui is empty — returning []');
+    return [];
+  }
+
+  const components = plan.ui.map((component, index) => {
+    const type = typeof component === 'string' ? component : (component.type || '');
+    const reg  = REGISTRY[type] || {
+      priority:     'low',
+      layout:       'full_width',
+      stage:        'summary',
+      trigger:      null,
+      expandOnLoad: false,
+      interactive:  false,
+      actions:      [],
+    };
+
+    return {
+      id:      `${type}-${index}`,
+      type,
+      data:    {},
+      loading: true,
+      meta: {
+        priority:    reg.priority,
+        layout:      reg.layout,
+        position:    index,
+        trigger:     reg.trigger,
+        stage:       reg.stage,
+        behavior: {
+          expandOnLoad: reg.expandOnLoad,
+          interactive:  reg.interactive,
+        },
+      },
+      insight: {
+        reason:     (typeof component === 'object' && component.panel_reason) || 'Loading…',
+        summary:    'Computing…',
+        confidence: 0,
+      },
+      actions: reg.actions,
+      version: 0,
+    };
+  });
+
+  log.info(
+    `[UIComposer] composeLoadingState — ${components.length} skeleton components` +
+    (loadingAgents.length ? ` | loading agents: [${loadingAgents.join(', ')}]` : ''),
+  );
 
   return components;
 }

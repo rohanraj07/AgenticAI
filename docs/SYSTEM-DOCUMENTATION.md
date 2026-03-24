@@ -31,6 +31,9 @@
 22. [Hybrid Compute Layer (ReactiveEngine + StateManager)](#22-hybrid-compute-layer-reactiveengine--statemanager)
 23. [Pure-Function Compute Modules](#23-pure-function-compute-modules)
 24. [A2UI v2 — Agent-to-UI Orchestration](#24-a2ui-v2--agent-to-ui-orchestration)
+25. [Priority Event Queue](#25-priority-event-queue)
+26. [Conflict Resolution](#26-conflict-resolution)
+27. [Full vs Partial Recompute](#27-full-vs-partial-recompute)
 
 ---
 
@@ -2329,6 +2332,22 @@ The Angular frontend treats the A2UI v2 array as a **read-only rendering contrac
 
 The `DynamicRendererComponent` renders each component using `comp.data` directly and surfaces `comp.insight.reason` as the "Why am I seeing this?" tooltip per panel.
 
+### UI consistency — no partial state
+
+The two-phase compose approach prevents partial renders:
+
+```
+Phase 1 (immediate): composeLoadingState(plan)
+  → loading:true, data:{}, confidence:0
+  → Frontend renders skeletons, no flicker
+
+Phase 2 (after agents): composeUI(plan, state)
+  → loading:false, data:filled, version:N
+  → Frontend swaps skeletons for real panels (atomic by version check)
+```
+
+The client stores `lastSeenVersion` and rejects any A2UI payload where `component.version < lastSeenVersion`.
+
 ### Adding a new panel (zero frontend changes)
 
 1. Add the component to `REGISTRY` in `ui.composer.js`
@@ -2338,3 +2357,209 @@ The `DynamicRendererComponent` renders each component using `comp.data` directly
 5. Deploy backend only
 
 The frontend will render the new panel automatically since it maps `type → Angular component` and the Angular component for that type already exists (or is added in a separate frontend PR).
+
+---
+
+## 25. Priority Event Queue
+
+### File: `backend/engine/priority.queue.js`
+
+### Purpose
+
+The PriorityQueue prevents two failure modes:
+1. **Overlapping cascades** — a PORTFOLIO_UPDATED cascade running while a PROFILE_UPDATED cascade is already active for the same session would produce an inconsistent intermediate state
+2. **Duplicate cascade waste** — 3 rapid PROFILE_UPDATED events for the same session should produce exactly 1 cascade, not 3
+
+### Priority levels
+
+```javascript
+export const PRIORITY = { HIGH: 1, MEDIUM: 2, LOW: 3 };
+
+export const EVENT_PRIORITY = {
+  PROFILE_UPDATED:    1,  // HIGH  — income/age change affects everything
+  TAX_UPDATED:        2,  // MEDIUM
+  CASHFLOW_UPDATED:   2,  // MEDIUM
+  PORTFOLIO_UPDATED:  2,  // MEDIUM
+  SIMULATION_UPDATED: 2,  // MEDIUM
+  EXPLANATION_READY:  3,  // LOW
+  AGENT_STARTED:      3,  // LOW
+  AGENT_COMPLETED:    3,  // LOW
+};
+```
+
+### Deduplication (coalescing)
+
+```javascript
+enqueue(event, sessionId, payload, priority):
+  key = `${event}:${sessionId}`
+  if key in _map:
+    // Merge — do not add a second entry
+    _map[key].payload   = { ..._map[key].payload, ...payload }
+    _map[key].updatedAt = Date.now()
+    return
+  entry = { event, sessionId, payload, priority, insertedAt: now() }
+  _map[key] = entry
+  _queue.push(entry)
+
+drain() → sorted by priority ASC, insertedAt ASC → clears queue and dedup map
+peek()  → returns next item without removing
+```
+
+### Integration with ReactiveEngine
+
+```
+Event fires for sessionId
+  ↓
+_pendingCascades.has(sessionId)?
+  YES → _queue.enqueue(event, sessionId, payload, priority)  ← coalesced if duplicate
+  NO  → _runCascade(sessionId, event, downstream, recomputeType)
+          ↓
+        _pendingCascades.set(sessionId, event)
+        await _cascade(...)
+        drain queue for this session → run remaining events (HIGH-first)
+        _pendingCascades.delete(sessionId)
+```
+
+### Conflict resolution with priority
+
+If `PROFILE_UPDATED` (HIGH) and `TAX_UPDATED` (MEDIUM) are both queued while a cascade runs:
+
+```
+drain() → sorted: [PROFILE_UPDATED(1), TAX_UPDATED(2)]
+          PROFILE_UPDATED runs first → FULL cascade
+          TAX_UPDATED runs second → PARTIAL cascade (simulation only)
+```
+
+This ensures high-priority full cascades always precede partial ones.
+
+---
+
+## 26. Conflict Resolution
+
+### File: `backend/engine/conflict.resolver.js`
+
+### Purpose
+
+When the same profile field is provided by multiple sources (e.g. user typed "income is 80k" in chat AND uploaded a W-2), a deterministic algorithm decides which value wins. No LLM involvement in this decision.
+
+### Source precedence table
+
+| Source | Rank | Typical scenario |
+|--------|------|-----------------|
+| `document_extracted` | 4 | Field value from an uploaded tax return or bank statement |
+| `user_stated` | 3 | User explicitly said "I make $80k" in chat |
+| `inferred` | 2 | LLM extracted from ambiguous text ("decent salary") |
+| `default` | 1 | System fallback / placeholder when no data exists |
+
+**Tie-breaking** (when ranks are equal):
+1. Higher `confidence` (0.0–1.0) wins
+2. If confidence equal, most recent `timestamp` wins
+
+### resolveField — field-level decision
+
+```javascript
+resolveField("income", [
+  { value: 80000, source: "user_stated",        confidence: 0.75, timestamp: T-60s },
+  { value: 95000, source: "document_extracted", confidence: 1.00, timestamp: T-now },
+])
+// → { value: 95000, source: "document_extracted" }
+// document_extracted rank (4) > user_stated rank (3)
+```
+
+### mergeProfiles — full profile merge
+
+Iterates every field in the incoming object, resolves each against the existing value (conservatively treated as `inferred` rank), returns a clean merged profile.
+
+```javascript
+existing = { income: 80000, age: 35, risk_tolerance: "medium" }
+incoming = { income: 95000, savings: 200000 }  // from document upload
+
+mergeProfiles(existing, incoming, "document_extracted")
+→ { income: 95000, age: 35, risk_tolerance: "medium", savings: 200000 }
+//  ↑ document wins    ↑ preserved               ↑ added
+```
+
+### scoreDataQuality — 0.0–1.0 completeness score
+
+```
+Full profile fields: [name, age, income, retirement_age, current_savings, monthly_savings, risk_tolerance]
+Base deduction: 1/7 ≈ 0.143 per missing field
+Extra deduction: 0.15 for each missing critical field (income, retirement_age)
+
+Examples:
+  All 7 fields present → 1.0
+  Missing income only  → 1.0 - 0.143 - 0.15 = 0.707
+  Missing both critical → 1.0 - 2×(0.143 + 0.15) = 0.414
+```
+
+Score is surfaced as `insight.confidence` on A2UI v2 panels.
+
+### Event emitted after conflict resolution
+
+```javascript
+eventEmitter.emitConflictResolved(sessionId, "income", winner, loser)
+// → CONFLICT_RESOLVED event (priority: LOW) → logged; not cascaded
+```
+
+---
+
+## 27. Full vs Partial Recompute
+
+### Decision table
+
+| Trigger Event | Recompute Type | Downstream | Reason |
+|---------------|---------------|------------|--------|
+| `PROFILE_UPDATED` | **FULL** | simulation → portfolio → risk | Age/income/savings change affects all projections |
+| `TAX_UPDATED` | **PARTIAL** | simulation only | Tax signals adjust effective savings rate assumption |
+| `CASHFLOW_UPDATED` | **PARTIAL** | simulation only | Spending patterns affect monthly surplus calculation |
+| `SIMULATION_UPDATED` | **PARTIAL** | portfolio → risk | New savings gap changes allocation and risk score |
+| `PORTFOLIO_UPDATED` | **PARTIAL** | risk only | Equity % change → risk score formula input changes |
+
+### Why FULL vs PARTIAL matters
+
+A FULL cascade re-runs all three compute functions sequentially:
+```
+simulation (~1ms) → portfolio (~1ms) → risk (~1ms)
+total: ~3ms, 3 StateManager.update() calls, 3 Redis writes, 3 WebSocket pushes
+```
+
+A PARTIAL cascade (e.g. PORTFOLIO_UPDATED) runs only risk:
+```
+risk (~1ms)
+total: ~1ms, 1 StateManager.update(), 1 Redis write, 1 WebSocket push
+```
+
+Partial recomputes avoid unnecessary computation. For example, a TAX_UPDATED event should not re-run portfolio allocation since tax signals don't affect the glide-path formula.
+
+### Logging
+
+Every cascade logs its type:
+```
+[ReactiveEngine] PROFILE_UPDATED → FULL cascade | agents=[simulation, portfolio, risk] session=abc-123
+[ReactiveEngine] ✔ simulation recomputed (1ms)
+[ReactiveEngine] ✔ portfolio recomputed (1ms)
+[ReactiveEngine] ✔ risk recomputed (1ms)
+
+[ReactiveEngine] TAX_UPDATED → PARTIAL cascade | agents=[simulation] session=abc-123
+[ReactiveEngine] ✔ simulation recomputed (1ms)
+```
+
+The millisecond times confirm deterministic math (not LLM — which takes hundreds of ms).
+
+### StateManager version tracking
+
+Every `update()` call — from any cascade step — increments `state._version`:
+
+```
+FULL cascade (PROFILE_UPDATED):
+  before: _version=5
+  after simulation: _version=6
+  after portfolio:  _version=7
+  after risk:       _version=8
+
+PARTIAL cascade (TAX_UPDATED):
+  before: _version=8
+  after simulation: _version=9
+```
+
+The A2UI v2 `version` field on each component equals `state._version` at the time `composeUI()` is called. The Angular client can use this to detect and discard stale responses.

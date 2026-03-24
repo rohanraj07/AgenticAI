@@ -25,6 +25,7 @@ export function emptyState() {
     tax:        null,
     cashflow:   null,
     uiContext:  null,  // A2UI v2 schema — built by ui.composer.js after each pipeline run
+    _version:   0,     // monotonically incremented on every update()
   };
 }
 
@@ -54,10 +55,23 @@ export class StateManager {
    */
   update(sessionId, patch) {
     const current = this.get(sessionId);
-    const next    = { ...current, ...patch };
+    const next    = { ...current, ...patch, _version: (current._version ?? 0) + 1 };
     this._store.set(sessionId, next);
-    log.info(`[StateManager] session=${sessionId} patched keys=[${Object.keys(patch).join(', ')}]`);
+    log.info(
+      `[StateManager] session=${sessionId} patched keys=[${Object.keys(patch).join(', ')}] version=${next._version}`,
+    );
     return next;
+  }
+
+  /**
+   * Return the current version number for a session.
+   * Starts at 0 for an unseeded session; increments by 1 on every update().
+   *
+   * @param {string} sessionId
+   * @returns {number}
+   */
+  getVersion(sessionId) {
+    return this.get(sessionId)._version ?? 0;
   }
 
   /**
