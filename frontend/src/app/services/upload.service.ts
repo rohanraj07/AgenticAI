@@ -1,13 +1,14 @@
 import { Injectable } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
+import { A2UIComponent } from './chat.service';
 
 export interface UploadResponse {
   sessionId: string;
   message: string;
   documentType: string;
   confidence: string;
-  ui: { type: string }[];
+  ui: A2UIComponent[];
   data: Record<string, unknown>;
   ingestion: {
     document_type: string;

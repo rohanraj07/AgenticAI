@@ -1,12 +1,18 @@
 import { PromptTemplate } from '@langchain/core/prompts';
 
 // ── Planner ──────────────────────────────────────────────────────────────────
+// The planner is an INTENT CLASSIFIER only.
+// It decides WHAT to show and WHY — not HOW or WHEN (that is the UI Composer's job).
+// The planner does NOT trigger recomputation or execute financial logic.
 export const plannerPrompt = PromptTemplate.fromTemplate(`
 You are the Planner Agent for a financial planning system.
-Analyze the user's message and decide which agents to invoke.
+Your ONLY job is to: (1) classify the user's intent, (2) select which agents to invoke,
+(3) list which UI panels to show, and (4) explain WHY you chose them.
+
+You do NOT compute anything. You do NOT control recomputation. You classify intent.
 
 Available agents: profile, simulation, portfolio, risk, tax, cashflow, explanation
-Available UI types: profile_summary, simulation_chart, portfolio_view, risk_dashboard, tax_panel, cashflow_panel, explanation_panel
+Available UI panels: profile_summary, simulation_chart, portfolio_view, risk_dashboard, tax_panel, cashflow_panel, explanation_panel
 
 Session context (may be empty on first message):
 {context}
@@ -16,16 +22,24 @@ Simulation already exists: {simulationExists}
 
 User message: {message}
 
-Decision rules:
+Agent selection rules:
 - ALWAYS include "explanation" as the final agent.
-- Include "profile" if this is the first message or if user shares new personal details (age, income, goals).
+- Include "profile" if this is the first message or user shares new personal details.
 - Include "simulation" if user asks about retirement, savings goals, projections, or financial future.
-- Include "portfolio" only if user asks about investments or allocations (requires simulation).
-- Include "risk" only if user asks about risk, market exposure, or volatility (requires portfolio).
-- Include "tax" only if context explicitly mentions taxes, deductions, or tax optimization.
-- Include "cashflow" only if context explicitly mentions spending, budget, or monthly cash flow.
-- Set confidence to "high" if intent is unambiguous, "medium" if somewhat unclear, "low" if very vague.
-- List in "missing_data" any document types that would improve the analysis (e.g. "tax_document", "bank_statement").
+- Include "portfolio" ONLY if user asks about investments or allocations (requires simulation first).
+- Include "risk" ONLY if user asks about risk or volatility (requires portfolio first).
+- Include "tax" ONLY if context mentions taxes, deductions, or tax optimization.
+- Include "cashflow" ONLY if context mentions spending, budget, or monthly cash flow.
+
+Confidence rules:
+- "high"   — user intent is unambiguous
+- "medium" — intent is somewhat unclear
+- "low"    — very vague or ambiguous
+
+missing_data: list document types that would improve analysis (e.g. "tax_document", "bank_statement").
+
+For each UI panel, write a one-sentence panel_reason explaining exactly why you included it
+(this will be shown to the user as "Why am I seeing this?").
 
 Respond ONLY with valid JSON:
 {{
@@ -37,13 +51,13 @@ Respond ONLY with valid JSON:
   "decision_rationale": "Included simulation because user asked about retirement timeline.",
   "agents": ["profile", "simulation", "explanation"],
   "ui": [
-    {{"type": "profile_summary"}},
-    {{"type": "simulation_chart"}},
-    {{"type": "explanation_panel"}}
+    {{"type": "profile_summary",   "panel_reason": "Profile needed to personalize projections"}},
+    {{"type": "simulation_chart",  "panel_reason": "User asked about retirement feasibility"}},
+    {{"type": "explanation_panel", "panel_reason": "Summarizes all findings in plain English"}}
   ],
   "params": {{}}
 }}
-Only include agents and UI components relevant to the user's request.
+Only include agents and UI panels relevant to the user's actual request.
 `);
 
 // ── Profile ───────────────────────────────────────────────────────────────────

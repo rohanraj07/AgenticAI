@@ -6,6 +6,7 @@ import { ProfileFormComponent } from './components/profile-form/profile-form.com
 import { FileUploadComponent } from './components/file-upload/file-upload.component';
 import { HealthService, ServiceStatus } from './services/health.service';
 import { UploadResponse } from './services/upload.service';
+import { A2UIComponent } from './services/chat.service';
 
 @Component({
   selector: 'app-root',
@@ -62,7 +63,7 @@ import { UploadResponse } from './services/upload.service';
 export class AppComponent implements OnInit {
   @ViewChild('chatRef') chatRef!: ChatComponent;
 
-  uiComponents: { type: string }[] = [];
+  uiComponents: A2UIComponent[] = [];
   data: Record<string, unknown> = {};
   trace: unknown[] = [];
   services: ServiceStatus[] = [];
@@ -83,7 +84,7 @@ export class AppComponent implements OnInit {
     this.chatRef?.send(message);
   }
 
-  onResponseReceived(response: { ui: { type: string }[]; data: Record<string, unknown>; trace: unknown[]; sessionId?: string }): void {
+  onResponseReceived(response: { ui: A2UIComponent[]; data: Record<string, unknown>; trace: unknown[]; sessionId?: string }): void {
     // Chat response replaces layout — planner decided the full set of panels
     this.uiComponents = response.ui;
     this.data = { ...this.data, ...response.data };

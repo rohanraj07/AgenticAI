@@ -5,7 +5,7 @@ import {
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { finalize } from 'rxjs/operators';
-import { ChatService, ChatResponse } from '../../services/chat.service';
+import { ChatService, ChatResponse, A2UIComponent } from '../../services/chat.service';
 import { WebSocketService, WsMessage } from '../../services/websocket.service';
 import { Subscription } from 'rxjs';
 
@@ -67,7 +67,7 @@ const QUICK_ACTIONS = [
 })
 export class ChatComponent implements OnInit, AfterViewChecked, OnDestroy {
   @Output() responseReceived = new EventEmitter<{
-    ui: { type: string }[];
+    ui: A2UIComponent[];
     data: Record<string, unknown>;
     trace: unknown[];
     sessionId?: string;

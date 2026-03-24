@@ -1,5 +1,6 @@
 import { Component, Input, OnChanges } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { A2UIComponent } from '../../services/chat.service';
 import { ProfileComponent }    from '../profile/profile.component';
 import { SimulationComponent } from '../simulation/simulation.component';
 import { PortfolioComponent }  from '../portfolio/portfolio.component';
@@ -33,12 +34,17 @@ import { CashflowComponent }   from '../cashflow/cashflow.component';
     </div>
 
     <ng-container *ngFor="let comp of uiComponents">
-      <app-profile       *ngIf="comp.type === 'profile_summary'"   [profile]="profile"></app-profile>
-      <app-simulation    *ngIf="comp.type === 'simulation_chart'"  [simulation]="simulation"></app-simulation>
-      <app-portfolio     *ngIf="comp.type === 'portfolio_view'"    [portfolio]="portfolio"></app-portfolio>
-      <app-risk          *ngIf="comp.type === 'risk_dashboard'"    [risk]="risk"></app-risk>
-      <app-tax           *ngIf="comp.type === 'tax_panel'"         [tax]="tax"></app-tax>
-      <app-cashflow      *ngIf="comp.type === 'cashflow_panel'"    [cashflow]="cashflow"></app-cashflow>
+      <!-- A2UI v2: insight banner shown per panel -->
+      <div *ngIf="comp.insight?.reason"
+           style="font-size:11px; color:#64748b; padding:4px 12px 0; font-style:italic;">
+        {{comp.insight.reason}}
+      </div>
+      <app-profile       *ngIf="comp.type === 'profile_summary'"   [profile]="comp.data['name'] ? comp.data : profile"></app-profile>
+      <app-simulation    *ngIf="comp.type === 'simulation_chart'"  [simulation]="comp.data['can_retire_at_target'] !== undefined ? comp.data : simulation"></app-simulation>
+      <app-portfolio     *ngIf="comp.type === 'portfolio_view'"    [portfolio]="comp.data['strategy'] ? comp.data : portfolio"></app-portfolio>
+      <app-risk          *ngIf="comp.type === 'risk_dashboard'"    [risk]="comp.data['overall_risk_score'] !== undefined ? comp.data : risk"></app-risk>
+      <app-tax           *ngIf="comp.type === 'tax_panel'"         [tax]="comp.data['tax_efficiency_score'] !== undefined ? comp.data : tax"></app-tax>
+      <app-cashflow      *ngIf="comp.type === 'cashflow_panel'"    [cashflow]="comp.data['budget_health'] ? comp.data : cashflow"></app-cashflow>
       <app-explanation   *ngIf="comp.type === 'explanation_panel'" [data]="data"></app-explanation>
     </ng-container>
 
@@ -46,7 +52,7 @@ import { CashflowComponent }   from '../cashflow/cashflow.component';
   `,
 })
 export class DynamicRendererComponent implements OnChanges {
-  @Input() uiComponents: { type: string }[] = [];
+  @Input() uiComponents: A2UIComponent[] = [];
   @Input() data: Record<string, unknown> = {};
   @Input() trace: unknown[] = [];
 

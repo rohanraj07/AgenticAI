@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { buildFinancialGraph } from '../langgraph/graph.js';
 import { redisMemory, vectorStore, eventEmitter, reactiveEngine } from '../services.js';
+import { composeUI } from '../engine/ui.composer.js';
 import { MarkdownMemory } from '../memory/markdown.memory.js';
 import { log } from '../logger.js';
 
@@ -126,10 +127,13 @@ chatRoute.post('/chat', async (req, res) => {
     const totalMs = Date.now() - reqStart;
     log.route(`  Response sent | ui=[${(plan?.ui || []).map((u) => u.type).join(', ')}] | total=${totalMs}ms`);
 
+    const richUI = composeUI(plan, { profile, simulation, portfolio, risk, tax, cashflow });
+    await redisMemory.updateSession(sessionId, { uiContext: richUI });
+
     res.json({
       sessionId,
       message: explanation || plan?.intent || 'Processing complete.',
-      ui:      plan?.ui || [],
+      ui:      richUI,
       data:    { profile, simulation, portfolio, risk, tax, cashflow },
       meta: {
         intent:             plan?.intent,

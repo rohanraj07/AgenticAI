@@ -7,6 +7,27 @@ export interface ChatRequest {
   message: string;
 }
 
+export interface A2UIComponent {
+  id: string;
+  type: string;
+  data: Record<string, unknown>;
+  meta: {
+    priority: 'high' | 'medium' | 'low';
+    layout: 'full_width' | 'half' | 'sidebar';
+    position: number;
+    trigger: string | null;
+    stage: 'summary' | 'detailed' | 'recommendation';
+    behavior: { expandOnLoad: boolean; interactive: boolean };
+  };
+  insight: {
+    reason: string;
+    summary: string;
+    confidence: number;
+  };
+  actions: { label: string; action: string }[];
+}
+
+/** @deprecated Use A2UIComponent */
 export interface UiComponent {
   type: string;
   [key: string]: unknown;
@@ -21,7 +42,7 @@ export interface TraceItem {
 export interface ChatResponse {
   sessionId: string;
   message: string;
-  ui: UiComponent[];
+  ui: A2UIComponent[];
   data: {
     profile: Record<string, unknown> | null;
     simulation: Record<string, unknown> | null;

@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { DocumentIngestionAgent } from '../agents/document.ingestion.agent.js';
 import { buildFinancialGraph } from '../langgraph/graph.js';
 import { redisMemory, vectorStore, eventEmitter, reactiveEngine } from '../services.js';
+import { composeUI } from '../engine/ui.composer.js';
 import { MarkdownMemory } from '../memory/markdown.memory.js';
 import { log } from '../logger.js';
 
@@ -167,6 +168,9 @@ uploadRoute.post('/upload', upload.single('document'), async (req, res) => {
     // 8. Save assistant reply
     await redisMemory.appendMessage(sessionId, 'assistant', explanation || syntheticPlan.intent);
 
+    const richUI = composeUI(syntheticPlan, { profile, simulation, portfolio, risk, tax, cashflow });
+    await redisMemory.updateSession(sessionId, { uiContext: richUI });
+
     const totalMs = Date.now() - reqStart;
     log.route(`  Upload complete | ui=[${syntheticPlan.ui.map((u) => u.type).join(', ')}] | total=${totalMs}ms`);
 
@@ -175,7 +179,7 @@ uploadRoute.post('/upload', upload.single('document'), async (req, res) => {
       message:      explanation || `Document analyzed: ${ingestion.abstracted_signals?.primary_insight}`,
       documentType: ingestion.document_type,
       confidence:   ingestion.confidence,
-      ui:           syntheticPlan.ui,
+      ui:           richUI,
       data:         { profile, simulation, portfolio, risk, tax, cashflow },
       ingestion: {
         document_type:       ingestion.document_type,

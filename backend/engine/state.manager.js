@@ -24,6 +24,7 @@ export function emptyState() {
     risk:       null,
     tax:        null,
     cashflow:   null,
+    uiContext:  null,  // A2UI v2 schema — built by ui.composer.js after each pipeline run
   };
 }
 
@@ -73,6 +74,7 @@ export class StateManager {
       risk:       session.risk       ?? null,
       tax:        session.tax        ?? null,
       cashflow:   session.cashflow   ?? null,
+      uiContext:  session.uiContext  ?? null,
     });
   }
 
