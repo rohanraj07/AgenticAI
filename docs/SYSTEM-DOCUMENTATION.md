@@ -34,6 +34,8 @@
 25. [Priority Event Queue](#25-priority-event-queue)
 26. [Conflict Resolution](#26-conflict-resolution)
 27. [Full vs Partial Recompute](#27-full-vs-partial-recompute)
+28. [StaleGuard — Cascade Cancellation](#28-staleguard--cascade-cancellation)
+29. [SchemaValidator — PII Write Enforcement](#29-schemavalidator--pii-write-enforcement)
 
 ---
 
@@ -1449,217 +1451,151 @@ if (profile) {
 
 ## 16. Session Atomicity & Concurrency
 
-### Current Behavior — Non-Atomic Writes
+### Optimistic Locking — Implemented
 
-The current `updateSession()` in `redis.memory.js` performs a **non-atomic read-modify-write**:
+**File**: `backend/memory/redis.memory.js`
+
+`updateSession()` implements **optimistic locking** via a `_expectedVersion` sentinel field. Every Redis write increments `_version`. A stale write is rejected with `OptimisticLockError`.
 
 ```javascript
 async updateSession(sessionId, partial) {
-  const existing = await this.getSession(sessionId);   // READ
-  const merged = { ...existing, ...partial };           // MODIFY (in-memory)
-  await this.saveSession(sessionId, merged);            // WRITE
+  // 1. PII-safe write check (throws SchemaViolationError if forbidden fields present)
+  _validator.validateSessionWrite(partial);
+
+  const existing = (await this.getSession(sessionId)) || {};
+
+  // 2. Optimistic version check
+  if (partial._expectedVersion !== undefined) {
+    const storedVersion = existing._version ?? 0;
+    if (storedVersion !== partial._expectedVersion) {
+      throw new OptimisticLockError(sessionId, partial._expectedVersion, storedVersion);
+    }
+  }
+
+  // 3. Strip sentinel — never persisted
+  const { _expectedVersion: _, ...safePatch } = partial;
+
+  const merged = {
+    ...existing,
+    ...safePatch,
+    _version:  (existing._version ?? 0) + 1,
+    updatedAt: new Date().toISOString(),
+  };
+  await this.saveSession(sessionId, merged);
+  return merged;
 }
 ```
 
-**Race condition scenario**:
-```
-Request A reads session  →  { profile: null, simulation: null }
-Request B reads session  →  { profile: null, simulation: null }
-Request A writes         →  { profile: {...}, simulation: null }
-Request B writes         →  { profile: null,  simulation: {...} }   ← A's profile is LOST
+### OptimisticLockError
+
+```javascript
+export class OptimisticLockError extends Error {
+  constructor(sessionId, expected, actual) {
+    super(`Optimistic lock conflict session=${sessionId}: expected=${expected} got=${actual}`);
+    this.name      = 'OptimisticLockError';
+    this.sessionId = sessionId;
+    this.expected  = expected;
+    this.actual    = actual;
+  }
+}
 ```
 
-This can happen if a user sends two messages in rapid succession, or if the chat and upload routes run concurrently for the same session.
+Callers that pass `_expectedVersion` in their patch will receive this error on a stale write, enabling them to retry with a fresh read.
+
+### Version tracking
+
+`_version` is incremented on **every** `updateSession()` call — unconditionally, regardless of which fields are in the patch. The `StateManager` also increments its own `_version` on every `update()`. Both track independently but both monotonically increase.
 
 ### What Happens if an Agent Fails Mid-Write
 
-With the current `withFallback()` design:
-1. Each agent returns an empty patch `{}` on failure
+With the `withFallback()` design:
+1. Each failing agent returns an empty patch `{}`
 2. Routes only call `updateSession()` if the value is non-null
-3. So a failing agent simply produces no write — it does not corrupt existing data
+3. A failing agent produces no write — does not corrupt existing data
 4. Risk is data incompleteness, not corruption
 
-### Fix Option 1 — Optimistic Locking with Version Field
+### Practical Impact
 
-```javascript
-async updateSessionAtomic(sessionId, partial) {
-  const MAX_RETRIES = 3;
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    const existing = await this.getSession(sessionId) || { _version: 0 };
-    const expectedVersion = existing._version || 0;
-
-    const merged = {
-      ...existing,
-      ...partial,
-      _version: expectedVersion + 1,
-      updatedAt: new Date().toISOString(),
-    };
-
-    // Only write if version hasn't changed (WATCH + MULTI/EXEC equivalent via Lua)
-    const written = await this._compareAndSet(sessionId, merged, expectedVersion);
-    if (written) return merged;
-
-    // Version mismatch — another request updated session, retry
-    await new Promise(r => setTimeout(r, 10 * (attempt + 1)));
-  }
-  throw new Error(`Session ${sessionId} update conflict after ${MAX_RETRIES} retries`);
-}
-
-// Lua script: atomic compare-and-set
-async _compareAndSet(sessionId, newValue, expectedVersion) {
-  const script = `
-    local current = redis.call('GET', KEYS[1])
-    if current == false then
-      redis.call('SETEX', KEYS[1], ARGV[2], ARGV[1])
-      return 1
-    end
-    local data = cjson.decode(current)
-    if (data._version or 0) == tonumber(ARGV[3]) then
-      redis.call('SETEX', KEYS[1], ARGV[2], ARGV[1])
-      return 1
-    end
-    return 0
-  `;
-  const result = await this.client.eval(
-    script, 1,
-    `session:${sessionId}`,
-    JSON.stringify(newValue),
-    this.ttl,
-    String(expectedVersion),
-  );
-  return result === 1;
-}
-```
-
-### Fix Option 2 — Per-Session Mutex (Simpler, No Lua Required)
-
-```javascript
-// In-memory mutex map (works for single-process; use Redis SET NX for multi-process)
-const sessionLocks = new Map();
-
-async updateSessionSafe(sessionId, partial) {
-  // Wait for any existing lock on this session
-  while (sessionLocks.has(sessionId)) {
-    await sessionLocks.get(sessionId);
-  }
-
-  let resolve;
-  const lock = new Promise(r => { resolve = r; });
-  sessionLocks.set(sessionId, lock);
-
-  try {
-    const existing = await this.getSession(sessionId) || {};
-    const merged = { ...existing, ...partial, updatedAt: new Date().toISOString() };
-    await this.saveSession(sessionId, merged);
-    return merged;
-  } finally {
-    sessionLocks.delete(sessionId);
-    resolve();
-  }
-}
-```
-
-### Practical Impact Assessment
-
-| Scenario | Risk without fix | Risk with mutex |
-|---|---|---|
-| Two rapid chat messages | Profile from first message overwritten by second | Serialized — both writes succeed in order |
-| Chat + upload simultaneously | One write lost | Serialized — both complete |
-| Agent fails mid-pipeline | No write (safe) | No change — already safe |
-| Backend restarted | In-memory mutex lost | No stale locks — clean state |
-
-> **Current status**: The mutex is not yet implemented. For a single-user POC with sequential requests, the race condition is unlikely to trigger. For production multi-user usage, `updateSessionSafe()` must replace `updateSession()`.
+| Scenario | Behaviour |
+|---|---|
+| Two rapid chat messages (no `_expectedVersion`) | Last write wins — non-critical for POC |
+| Caller passes `_expectedVersion` on stale state | `OptimisticLockError` thrown — caller can retry |
+| Agent fails mid-pipeline | No write (safe — `withFallback()` returns `{}`) |
+| Backend restarted | In-memory `StateManager` cleared; Redis state survives |
 
 ---
 
 ## 17. Vector DB Isolation Guarantees
 
-### How sessionId is Enforced on WRITE
+### File: `backend/vector/vector.store.js`
 
-Every document stored in ChromaDB includes `sessionId` in its metadata:
+### Enforcement — WRITE path
+
+Every document stored in ChromaDB includes `sessionId` in its metadata. The strict write method **throws** if sessionId is missing:
 
 ```javascript
-// vector.store.js — storeSessionSnapshot()
-await this.add(id, markdownContent, { sessionId, type: 'session_snapshot' });
-
-// vector.store.js — add()
-await this.collection.add({
-  ids:        [id],
-  embeddings: [vector],
-  documents:  [text],
-  metadatas:  [{ sessionId, type: 'session_snapshot' }],  // ← sessionId always present
-});
+// storeForSession() — enforced, throws on missing sessionId
+async storeForSession(sessionId, content) {
+  if (!sessionId || typeof sessionId !== 'string' || sessionId.trim() === '') {
+    throw new Error('[VectorStore] storeForSession: sessionId is required — refusing unscoped write');
+  }
+  return this.storeSessionSnapshot(sessionId, content);
+}
 ```
 
-**Enforcement**: `sessionId` is a required parameter in `storeSessionSnapshot()`. There is no public method to store without a sessionId.
+### Enforcement — READ path
 
-### How sessionId is Enforced on READ
-
-Every query passes `where: { sessionId }` when a sessionId is available:
+The strict read method **throws** if sessionId is missing:
 
 ```javascript
-// vector.store.js — search()
-if (sessionId) queryParams.where = { sessionId };
-const results = await this.collection.query(queryParams);
-```
-
-**The gap**: `sessionId` is optional — `search(query, null)` returns results **across all sessions**. This is the cross-session data leak risk.
-
-### Failure Scenario — Filter Missed
-
-```javascript
-// UNSAFE: called without sessionId
-const ragContext = await vectorStore.searchAsContext(message);
-// Returns documents from ALL sessions — user A can see user B's financial context
-```
-
-This would happen if a developer adds a new route and forgets to pass `sessionId`.
-
-### Mitigation — Strict Wrapper Enforcing sessionId
-
-Add a `searchForSession()` method that makes `sessionId` mandatory:
-
-```javascript
-// vector.store.js (proposed addition)
-async searchForSession(query, sessionId) {
-  if (!sessionId) throw new Error('VectorStore.searchForSession: sessionId is required');
+// queryForSession() — enforced, throws on missing sessionId
+async queryForSession(sessionId, query) {
+  if (!sessionId || typeof sessionId !== 'string' || sessionId.trim() === '') {
+    throw new Error('[VectorStore] queryForSession: sessionId is required — refusing to run unscoped query');
+  }
   return this.searchAsContext(query, sessionId);
 }
 ```
 
-Replace all calls in routes with `searchForSession()` instead of `searchAsContext()`:
-```javascript
-// chat.route.js
-const ragContext = await vectorStore.searchForSession(message, sessionId);  // throws if no sessionId
+**Old methods preserved**: `search(query, sessionId?)` and `searchAsContext(query, sessionId?)` still exist for backward compatibility but accept optional sessionId. All agent and route code uses `queryForSession` / `storeForSession` exclusively.
 
-// upload.route.js
-const ragContext = await vectorStore.searchForSession(`financial document ${fileName}`, sessionId);
+### Why this matters
+
+Without session enforcement:
+```javascript
+// UNSAFE: returns documents across ALL sessions
+const ragContext = await vectorStore.searchAsContext(message);
+// User A can see User B's financial context
 ```
 
-### Collection Strategy
+With enforcement:
+```javascript
+// SAFE: throws immediately if sessionId is not provided
+const ragContext = await vectorStore.queryForSession(sessionId, message);
+```
 
-Currently all sessions share **one collection** (`financial_memory` / `financial_planning`), isolated by metadata filter. An alternative is **per-session collections**:
-
-| Strategy | Current | Alternative |
-|---|---|---|
-| **Isolation mechanism** | `where: { sessionId }` metadata filter | Separate collection per session |
-| **Risk of cross-contamination** | Developer forgets filter | Zero — separate namespace |
-| **Cleanup** | Must delete by filter | `client.deleteCollection(sessionId)` |
-| **Scale** | One collection, N sessions | N collections |
-| **ChromaDB limit** | Not a concern for POC | Collections have overhead at scale |
-
-> **Recommendation for production**: Per-session collections eliminate the filter-miss risk entirely. For current POC scale, the metadata filter with the mandatory wrapper is sufficient.
+The error surfaces at development time — not as a silent data leak in production.
 
 ### In-Memory Fallback Isolation
 
-The fallback array applies the same filter:
+The fallback array applies the same filter on `search()`:
 ```javascript
 const pool = sessionId
   ? this._fallbackDocs.filter((d) => d.metadata?.sessionId === sessionId)
   : this._fallbackDocs;
 ```
 
-Same gap: if `sessionId` is null, all docs are returned. The `searchForSession()` wrapper fixes this path too.
+The `queryForSession()` wrapper ensures `sessionId` is always provided, so the unscoped path is never reached through the enforced API.
+
+### Collection Strategy
+
+All sessions share one collection (`financial_memory`), isolated by metadata filter. The enforcement wrappers ensure the filter is always applied.
+
+| Isolation mechanism | Current implementation |
+|---|---|
+| Write: sessionId in metadata | `storeForSession()` throws if missing |
+| Read: `where: { sessionId }` filter | `queryForSession()` throws if missing |
+| Fallback: metadata filter on array | Same filter applied |
 
 ---
 
@@ -1921,13 +1857,13 @@ redisClient.subscribe('__keyevent@0__:expired', (key) => {
 
 ### Enforcement Strategy
 
-| Boundary | Current enforcement | Gap |
+| Boundary | Enforcement | Status |
 |---|---|---|
-| multer → disk | `memoryStorage()` — no disk write | None |
-| raw_values → Redis | `sanitizeTaxInsights()` / `sanitizeCashflowInsights()` called before any persist | Profile agent raw numbers still written to Redis (see Section 15) |
-| documentText → logs | `redactDocument()` exists but not called in logging paths | Not enforced on debug logs |
-| profile → Redis | No `sanitizeProfile()` applied before save | **Gap — must be fixed** |
-| vector store | Anonymized summaries only | Content depends on what markdown is passed — abstraction maintained if markdown is correct |
+| multer → disk | `memoryStorage()` — no disk write | ✅ Enforced |
+| raw_values → Redis | `sanitizeTaxInsights()` / `sanitizeCashflowInsights()` before persist | ✅ Enforced |
+| Redis write → forbidden fields | `SchemaValidator.validateSessionWrite()` called in every `updateSession()` | ✅ Enforced — throws `SchemaViolationError` |
+| vector store → session scope | `queryForSession()` / `storeForSession()` throw on missing sessionId | ✅ Enforced |
+| documentText → logs | `redactDocument()` exists but not called in all logging paths | ⚠️ Gap — not enforced on debug logs |
 
 ### Trust Boundary Enforcement Point Map
 
@@ -1941,14 +1877,16 @@ Upload request
     │     raw_values extracted → sanitized → raw_values discarded
     │     ENFORCED by: sanitizeTaxInsights() / sanitizeCashflowInsights()
     │
-    ├─→ [BOUNDARY 3] Profile sanitizer (GAP — not yet applied)
-    │     profile.income/savings/monthly_expenses → must be range labels
-    │     REQUIRED: sanitizeProfile() before updateSession()
+    ├─→ [BOUNDARY 3] SchemaValidator (ENFORCED)
+    │     validateSessionWrite() called on every updateSession()
+    │     Throws SchemaViolationError if grossIncome, monthlySpend,
+    │     accountNumber, ssn, etc. detected in documentInsights
+    │     Also validates required label fields (income_range, budget_health)
     │
     └─→ [BOUNDARY 4] Storage writes
-          Redis: sanitized objects only
+          Redis: sanitized objects only (SchemaValidator as gate)
           Markdown: MarkdownMemory.write() formats to labels
-          Vector: anonymized summary strings
+          Vector: queryForSession/storeForSession enforce sessionId isolation
 ```
 
 ---
@@ -2030,7 +1968,7 @@ Timeline:
   T=20s  Both complete — final Redis state depends on write order
 ```
 
-**Result**: Non-deterministic final state. The last write wins on each key. As described in Section 16, a per-session mutex or optimistic locking is required to prevent this.
+**Result**: Non-deterministic final state. The last write wins on each key. Callers that need strict ordering can pass `_expectedVersion` in the patch — `OptimisticLockError` is thrown on a version mismatch (see Section 16).
 
 ### Summary Table
 
@@ -2038,7 +1976,7 @@ Timeline:
 |---|---|
 | Agents run in parallel? | No — strictly sequential per request |
 | Requests run in parallel? | Yes — Node.js handles concurrent requests |
-| Shared state between requests? | Only Redis (race condition exists — see Section 16) |
+| Shared state between requests? | Only Redis (optimistic locking via `_expectedVersion` — see Section 16) |
 | WebSocket event order | Guaranteed per session (sequential agent completion) |
 | Graph state isolation | Complete — each invocation has its own state object |
 
@@ -2563,3 +2501,184 @@ PARTIAL cascade (TAX_UPDATED):
 ```
 
 The A2UI v2 `version` field on each component equals `state._version` at the time `composeUI()` is called. The Angular client can use this to detect and discard stale responses.
+
+---
+
+## 28. StaleGuard — Cascade Cancellation
+
+### File: `backend/engine/stale.guard.js`
+
+### Purpose
+
+When a **higher-priority event** arrives while a **lower-priority cascade** is already running for the same session, the StaleGuard cancels the running cascade mid-step and allows the higher-priority event to start immediately.
+
+Without StaleGuard:
+```
+PORTFOLIO_UPDATED cascade running (steps: risk)
+PROFILE_UPDATED (HIGH) arrives
+→ ReactiveEngine enqueues PROFILE_UPDATED — waits for PORTFOLIO_UPDATED to finish
+→ Risk is computed on stale profile — then discarded
+→ Unnecessary compute wasted
+```
+
+With StaleGuard:
+```
+PORTFOLIO_UPDATED cascade running (step: risk)
+PROFILE_UPDATED (HIGH) arrives
+→ StaleGuard aborts PORTFOLIO_UPDATED cascade mid-step
+→ PROFILE_UPDATED starts immediately (FULL cascade)
+→ No stale intermediate state
+```
+
+### API
+
+```javascript
+class StaleGuard {
+  // Returns AbortSignal if caller can proceed; null if should enqueue
+  register(sessionId, incomingPriority) → AbortSignal | null
+
+  // Must call in finally block to release the session slot
+  clear(sessionId)
+
+  // Check if a session's cascade was aborted
+  isAborted(sessionId) → boolean
+
+  // Count of active (non-aborted) cascades
+  get activeCount() → number
+}
+```
+
+### Decision logic
+
+```
+register(sessionId, incomingPriority):
+  existing = _sessions.get(sessionId)
+
+  if no existing:
+    → create new AbortController, store it
+    → return AbortSignal (caller can proceed)
+
+  if incomingPriority < existing.priority:   // lower number = higher priority
+    → existing.controller.abort()             // abort running cascade
+    → _sessions.delete(sessionId)
+    → create new AbortController for incoming event
+    → return new AbortSignal (caller can proceed immediately)
+
+  else:
+    → return null (caller should enqueue and wait)
+```
+
+### Integration in ReactiveEngine
+
+```javascript
+// _attach() — on every incoming event
+const signal = this._staleGuard.register(sessionId, priority);
+
+if (signal === null) {
+  // Lower/equal priority — enqueue
+  this._queue.enqueue(event, sessionId, payload, priority);
+  return;
+}
+
+// Higher priority — abort cleared, proceed with fresh cascade
+this._pendingCascades.delete(sessionId);
+this._runCascade(sessionId, event, downstream, recomputeType, signal);
+
+// _cascade() — before each compute step
+if (signal?.aborted) {
+  log.warn('[ReactiveEngine] cascade aborted — superseded by higher-priority event');
+  return;  // exit cascade early
+}
+
+// finally block in _runCascade()
+this._staleGuard.clear(sessionId);
+```
+
+### Log output
+
+```
+[ReactiveEngine] cascade aborted at risk (superseded by higher-priority event) session=abc-123
+[ReactiveEngine] PROFILE_UPDATED → FULL cascade | agents=[simulation, portfolio, risk] session=abc-123
+```
+
+---
+
+## 29. SchemaValidator — PII Write Enforcement
+
+### File: `backend/memory/schema.validator.js`
+
+### Purpose
+
+A second line of defense ensuring that **raw PII fields never reach Redis**, even if a bug in the document ingestion pipeline produces them. The SchemaValidator is called by `RedisMemory.updateSession()` on **every write** — it cannot be bypassed by any caller.
+
+```
+First line of defense:  pii.sanitizer.js (maps raw values to labels before storage)
+Second line of defense: SchemaValidator  (blocks writes if forbidden fields present)
+```
+
+### Forbidden fields (anywhere inside `documentInsights`)
+
+```javascript
+const DOCUMENT_FORBIDDEN_FIELDS = new Set([
+  'grossIncome', 'netIncome', 'totalIncome', 'monthlyIncome',
+  'monthlySpend', 'monthlyExpenses',
+  'accountNumber', 'account_number', 'routingNumber', 'routing_number',
+  'ssn', 'taxId', 'tax_id', 'ein', 'socialSecurityNumber',
+]);
+```
+
+### Required label fields
+
+`documentInsights.tax` MUST include `income_range` (not `grossIncome`).
+`documentInsights.cashflow` MUST include `budget_health` and `savings_rate_label`.
+
+### API
+
+```javascript
+class SchemaValidator {
+  // Throws SchemaViolationError if violations found
+  validateSessionWrite(patch) → void
+
+  // Non-throwing version — returns violation descriptions
+  inspect(patch) → string[]
+}
+```
+
+### SchemaViolationError
+
+```javascript
+export class SchemaViolationError extends Error {
+  constructor(message, violations) {
+    super(message);
+    this.name       = 'SchemaViolationError';
+    this.violations = violations;  // string[] — one description per violation
+  }
+}
+```
+
+### Integration in RedisMemory
+
+```javascript
+const _validator = new SchemaValidator();  // module-level singleton
+
+async updateSession(sessionId, partial) {
+  _validator.validateSessionWrite(partial);  // ← throws before any Redis operation
+  // ... rest of updateSession
+}
+```
+
+### Log output (blocked write)
+
+```
+[Error] [SchemaValidator] BLOCKED Redis write — PII violations detected:
+  • Forbidden raw PII field "documentInsights.tax.grossIncome" detected.
+    Use an abstracted label (e.g. income_range, budget_health) instead.
+  • Missing required abstracted field "documentInsights.tax.income_range".
+    Raw document values must be abstracted before storage.
+```
+
+### Log output (clean write)
+
+```
+[Info] [SchemaValidator] ✔ session write validated — keys=[documentInsights, profile, simulation]
+```

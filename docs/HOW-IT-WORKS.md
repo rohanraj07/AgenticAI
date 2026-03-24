@@ -23,7 +23,7 @@ THIS system (deterministic engine + AI interface):
 
 ---
 
-## The Five Patterns
+## The Six Patterns
 
 ### Pattern 1 — State-Driven Execution
 
@@ -207,6 +207,56 @@ The server answers four questions per panel. The frontend renders what it is tol
 
 ---
 
+### Pattern 6 — Enforcement Layer (Not Just Design)
+
+Three enforcement mechanisms ensure the design guarantees hold at runtime — even if a developer introduces a bug.
+
+#### StaleGuard (`backend/engine/stale.guard.js`)
+
+When a higher-priority event arrives mid-cascade, the running cascade is aborted:
+
+```
+PORTFOLIO_UPDATED cascade running (computing risk)
+PROFILE_UPDATED (HIGH) arrives
+  → StaleGuard: abort() the running AbortController
+  → ReactiveEngine detects signal.aborted before next compute step
+  → PORTFOLIO_UPDATED cascade exits early
+  → PROFILE_UPDATED starts immediately (FULL cascade)
+```
+
+Without StaleGuard, the engine would wait for the PORTFOLIO cascade to finish before starting the higher-priority PROFILE cascade — producing a stale intermediate risk score.
+
+#### SchemaValidator (`backend/memory/schema.validator.js`)
+
+Every `RedisMemory.updateSession()` call validates the patch before any write:
+
+```
+documentInsights.tax = { grossIncome: 145000 }  ← forbidden raw PII
+  → SchemaValidator.validateSessionWrite() throws SchemaViolationError
+  → Redis write blocked
+  → Bug surfaces immediately at write time (not silently persisted)
+```
+
+The validator also checks that required abstracted fields are present:
+- `documentInsights.tax` must have `income_range` (not raw income)
+- `documentInsights.cashflow` must have `budget_health` and `savings_rate_label`
+
+#### VectorStore Session Isolation (`backend/vector/vector.store.js`)
+
+`queryForSession()` and `storeForSession()` throw immediately if `sessionId` is missing:
+
+```javascript
+// SAFE — throws if sessionId is falsy, empty, or not a string
+const ragContext = await vectorStore.queryForSession(sessionId, message);
+
+// UNSAFE (old API — still exists for backward compat but not used in routes)
+const ragContext = await vectorStore.searchAsContext(message);  // no sessionId → cross-session leak
+```
+
+The throw-on-missing pattern surfaces the bug at the call site — not as a silent data leak.
+
+---
+
 ## What Happens When You Ask "Can I retire at 55?"
 
 ### Step 1 — Route Layer
@@ -373,6 +423,9 @@ composeUI(syntheticPlan, state) →
 | Redis down | StateManager in-process Map used; session still works for duration of process |
 | LLM API timeout | `withFallback()` in every LangGraph node; simulation still returns deterministic numbers |
 | Cascade error | try/catch in `_runCascade`; error logged; queued events still drain |
+| Higher-priority event mid-cascade | StaleGuard aborts running cascade; fresh cascade starts immediately |
+| Forbidden PII in Redis patch | SchemaValidator throws `SchemaViolationError`; write blocked, not silently stored |
+| Missing sessionId in vector query | `queryForSession()` throws immediately; surfaces bug at call site |
 | Document too large | multer 5 MB limit rejects before ingestion; 400 returned |
 | PII sanitizer fails | Default safe values used; abstraction step never skipped |
 | Agent chain fails | `SAFE_DEFAULT_PLAN` used by planner; explanation agent has hardcoded fallback text |

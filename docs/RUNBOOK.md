@@ -332,6 +332,45 @@ The ms times confirm deterministic math. FULL vs PARTIAL label confirms correct 
 [ConflictResolver] scoreDataQuality → 0.857
 ```
 
+### Confirm StaleGuard (cascade abort on priority preemption)
+
+Trigger by sending a chat message that generates PROFILE_UPDATED while a reactive cascade is already running. In the logs look for:
+
+```
+[ReactiveEngine] cascade aborted at <agentName> (superseded by higher-priority event) session=abc-123
+```
+
+This confirms the AbortController fired and the lower-priority cascade exited early. The following line should be a fresh FULL cascade for PROFILE_UPDATED.
+
+### Confirm SchemaValidator (PII write enforcement)
+
+The validator runs silently on every clean write. Confirm it is active:
+
+```bash
+# Every clean write should produce this log line:
+grep "SchemaValidator.*✔ session write validated" <(npm run dev 2>&1)
+# → [Info] [SchemaValidator] ✔ session write validated — keys=[...]
+```
+
+To test it blocks bad writes (unit test or manual):
+```javascript
+// In Node REPL connected to your backend:
+import { RedisMemory } from './backend/memory/redis.memory.js';
+const r = new RedisMemory(); await r.connect();
+await r.updateSession('test', { documentInsights: { tax: { grossIncome: 145000 } } });
+// → throws SchemaViolationError — should never reach Redis
+```
+
+### Confirm VectorStore session isolation
+
+```bash
+# queryForSession should appear for every RAG lookup
+grep "queryForSession" <(npm run dev 2>&1)
+# → [VectorDB] queryForSession session=<uuid> query="..."
+```
+
+If you see a RAG lookup without `session=<uuid>`, it's calling the unsafe `searchAsContext()` directly — find and fix the caller.
+
 ### Confirm StateManager versioning
 
 ```bash
@@ -369,5 +408,9 @@ docker restart <chromadb-container-id>
 | Upload returns 400 | Field name must be `document`; file must be `.txt`, `.json`, or `.csv` |
 | Simulation returns $0 | Profile data missing — check profile agent ran and returned non-null |
 | ReactiveEngine not cascading | Check `services.js` exports `reactiveEngine`; check routes call `reactiveEngine.seedFromSession()` |
+| `SchemaViolationError` in logs | PII sanitizer bug — raw field reached `updateSession()`. Check `pii.sanitizer.js` output for that document type. |
+| `OptimisticLockError` in logs | Concurrent writes with `_expectedVersion` mismatch. If in ReactiveEngine, clear `_pendingCascades` and retry. |
+| `queryForSession: sessionId is required` | Missing sessionId in RAG call. Search for `searchAsContext()` or `search()` calls without sessionId in routes/agents. |
+| `cascade aborted` in logs | Expected — StaleGuard working correctly. Only investigate if it fires repeatedly for the same cascade without a higher-priority event. |
 | Angular compile error | `cd frontend && npm install` |
 | Port 3000 in use | `lsof -ti:3000 \| xargs kill` |

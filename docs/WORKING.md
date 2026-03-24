@@ -189,6 +189,61 @@ Planner enriches response using all accumulated context. No re-upload needed.
 
 ---
 
+### Step 6 — Enforcement Features (v3 logs)
+
+#### SchemaValidator — clean write
+
+```
+[Info] [SchemaValidator] ✔ session write validated — keys=[profile, simulation, uiContext]
+```
+
+#### SchemaValidator — blocked write (what a bug would look like)
+
+```
+[Error] [SchemaValidator] BLOCKED Redis write — PII violations detected:
+  • Forbidden raw PII field "documentInsights.tax.grossIncome" detected.
+    Use an abstracted label (e.g. income_range, budget_health) instead.
+  • Missing required abstracted field "documentInsights.tax.income_range".
+    Raw document values must be abstracted before storage.
+```
+
+If you see this in logs: the PII sanitizer has a bug — it produced raw values instead of labels.
+
+#### StaleGuard — higher-priority event aborts cascade mid-run
+
+```
+[ReactiveEngine] cascade aborted at risk (superseded by higher-priority event) session=<uuid>
+[ReactiveEngine] PROFILE_UPDATED → FULL cascade | agents=[simulation, portfolio, risk] session=<uuid>
+[ReactiveEngine] ✔ simulation recomputed (2ms)
+[ReactiveEngine] ✔ portfolio recomputed (1ms)
+[ReactiveEngine] ✔ risk recomputed (1ms)
+```
+
+Notice `cascade aborted at risk` — the old cascade exited before completing. The new FULL cascade then ran cleanly.
+
+#### VectorStore — session-scoped queries
+
+```
+[VectorDB] queryForSession session=<uuid> query="retirement feasibility..."
+[VectorDB] SEARCH query: retirement feasibility... | session: <uuid>
+[VectorDB]   → ChromaDB returned 3 results
+```
+
+If `queryForSession` were called without a sessionId, you'd see an error thrown immediately (not logged — it crashes the caller).
+
+#### Optimistic lock — version tracking
+
+```
+[Redis] SET session:<uuid> (TTL 3600s, 1240 bytes)
+[Redis] updateSession <uuid> → merged keys: [profile] version=3
+[Redis] updateSession <uuid> → merged keys: [simulation] version=4
+[Redis] updateSession <uuid> → merged keys: [portfolio] version=5
+```
+
+Version increments on every write. If you see the same version twice, there's a write that didn't go through `updateSession()`.
+
+---
+
 ## Verifying Deterministic Compute
 
 To confirm numbers come from math, not LLM:
@@ -322,3 +377,7 @@ Fallback mode: system fully functional — Redis → in-memory Map, ChromaDB →
 | Angular compile error | `cd frontend && npm install` |
 | Port 3000 in use | `lsof -ti:3000 \| xargs kill` |
 | Simulation number seems wrong | Check that `financial.calculator.js` is being used — confirm log shows `[Agent] SimulationAgent [1/2] deterministic projection` |
+| `SchemaViolationError` thrown | PII sanitizer bug — raw field (grossIncome, accountNumber, etc.) reached updateSession(). Fix the sanitizer, not the validator. |
+| `OptimisticLockError` thrown | Two writes hit the same session concurrently with `_expectedVersion` set. Caller should retry with a fresh `getSession()`. |
+| `queryForSession: sessionId is required` | Agent or route called VectorStore without passing sessionId. Always use `queryForSession(sessionId, query)`. |
+| Cascade log shows "aborted at …" | Expected — StaleGuard cancelled a lower-priority cascade when a higher-priority event arrived. No action needed. |

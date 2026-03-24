@@ -15,6 +15,8 @@
 | **Priority-driven events** | PROFILE_UPDATED (HIGH) pre-empts PORTFOLIO_UPDATED (MEDIUM). Coalescing prevents duplicate cascades. |
 | **Conflict resolution** | When the same field arrives from multiple sources, deterministic precedence rules decide the winner: `document_extracted > user_stated > inferred > default`. |
 | **Full vs Partial recompute** | PROFILE_UPDATED triggers a full cascade. TAX_UPDATED triggers only simulation (partial). Decision is in code, not LLM. |
+| **Stale cascade cancellation** | Higher-priority event aborts a running lower-priority cascade via AbortController (StaleGuard). No stale intermediate state. |
+| **PII write enforcement** | SchemaValidator blocks any `updateSession()` call that contains raw PII fields. Throws `SchemaViolationError` — never silently ignored. |
 | **Trust-by-design** | Raw documents never stored. Raw PII abstracted immediately. Only range labels persist. |
 | **A2UI v2 orchestration** | Server produces `{id, type, data, meta, insight, actions, version}` per panel. Frontend is a pure renderer. |
 | **Graceful degradation** | Redis, ChromaDB, and every LLM call have fallbacks. No single failure kills the pipeline. |
@@ -76,6 +78,12 @@
 │    LOW (3): EXPLANATION_READY, AGENT_STARTED, AGENT_COMPLETED        │
 │    Deduplication: same (event, sessionId) → payload merged, 1 entry  │
 │                                                                       │
+│  StaleGuard — mid-cascade abort                                       │
+│    AbortController per running cascade                                │
+│    Higher-priority event: abort() + start fresh cascade              │
+│    ReactiveEngine checks signal.aborted before each compute step     │
+│    clear() in finally block — no leak                                 │
+│                                                                       │
 │  ReactiveEngine — dependency-map cascade                              │
 │    _pendingCascades Map prevents overlapping cascades per session     │
 │    FULL:    PROFILE_UPDATED → simulation, portfolio, risk            │
@@ -101,6 +109,9 @@
 │  Redis (session JSON)   │  Markdown (.md files)  │  ChromaDB (RAG)  │
 │  TTL: 1 hour            │  LLM context injection  │  session-scoped  │
 │  Includes _version      │  Abstracted signals only│  No raw docs     │
+│  Optimistic lock via    │                         │  queryForSession │
+│  _expectedVersion       │                         │  storeForSession │
+│  SchemaValidator gate   │                         │  throw on no-id  │
 └──────────────────────────────────────────────────────────────────────┘
                                  │ events (WS push)
                                  ▼
@@ -331,7 +342,9 @@ function agent(state) → updatedPartialState
 | Trigger or skip recomputation | ReactiveEngine dependency map is hardcoded |
 | Resolve conflicting data | ConflictResolver precedence rules |
 | Decide UI layout or priority | UIComposer component registry |
-| Store or access raw PII | PII sanitizer runs before any chain |
+| Store raw PII (1st defense) | PII sanitizer maps values to labels before any write |
+| Store raw PII (2nd defense) | SchemaValidator throws on every `updateSession()` if forbidden fields detected |
+| Cross-session vector reads | `queryForSession()` throws if sessionId missing |
 
 ---
 
@@ -368,6 +381,9 @@ All cascade steps: deterministic, ~1–3ms each, zero LLM calls.
 | LLM API | Timeout / error | `withFallback()` + hardcoded text |
 | Planner chain | JSON parse fail | `SAFE_DEFAULT_PLAN` |
 | ReactiveEngine cascade | Agent compute throws | Error logged; other agents still run |
+| StaleGuard abort | Higher-priority event mid-cascade | Current cascade exits early; fresh cascade starts |
+| SchemaValidator | Forbidden PII field in patch | `SchemaViolationError` thrown — write blocked, not silently ignored |
+| OptimisticLockError | Version mismatch on write | Error thrown — caller can retry with fresh read |
 | PriorityQueue drain | Empty | No-op |
 | ConflictResolver | Missing source | Defaults to `inferred` rank |
 
