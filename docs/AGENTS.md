@@ -102,12 +102,18 @@ It does NOT:
   "decision_rationale": "Included simulation because user asked about retirement timeline.",
   "agents": ["profile", "simulation", "explanation"],
   "ui": [
-    { "type": "profile_summary" },
-    { "type": "simulation_chart" },
-    { "type": "explanation_panel" }
+    { "type": "profile_summary",   "panel_reason": "Profile needed to personalise projections" },
+    { "type": "simulation_chart",  "panel_reason": "User asked about retirement feasibility" },
+    { "type": "explanation_panel", "panel_reason": "Summarises all findings in plain English" }
   ]
 }
 ```
+
+The `panel_reason` fields are passed to the UIComposer which embeds them as `insight.reason` in each A2UI v2 component, so the frontend can show "Why am I seeing this?" per panel.
+
+### What the planner does NOT output
+
+The planner never outputs layout, priority, trigger events, or data slices. Those are all determined deterministically by `ui.composer.js`. The planner's only UI contribution is: *which panels* and *why*.
 
 ### Guardrails (enforced in code, not by LLM)
 

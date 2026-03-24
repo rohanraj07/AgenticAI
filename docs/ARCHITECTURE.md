@@ -147,13 +147,14 @@ state = {
                 rebalance_frequency, rationale },
   risk:       { overall_risk_score, risk_level, factors[], mitigation_steps[], stress_test{} },
   tax:        { tax_efficiency_score, tax_bracket, optimization_strategies[], ... },
-  cashflow:   { budget_health, savings_rate_label, spending_level, recommendations[], ... }
+  cashflow:   { budget_health, savings_rate_label, spending_level, recommendations[], ... },
+  uiContext:  A2UIComponent[]   // ← last rendered UI schema, persisted to Redis
 }
 ```
 
 This lives in:
 - **StateManager** (in-process, for ReactiveEngine access)
-- **Redis** (durable, TTL 1 hour)
+- **Redis** (durable, TTL 1 hour — includes `uiContext`)
 - **Markdown** (human-readable context for LLM)
 
 All three are kept in sync. StateManager is seeded from Redis on every request.
@@ -247,21 +248,61 @@ All cascade steps are deterministic. Zero LLM calls in any reactive recomputatio
 
 ---
 
-## A2UI — Agent-to-UI Dynamic Rendering
+## A2UI v2 — Agent-to-UI Orchestration
 
-The server decides which UI panels to render. The frontend is a pure rendering layer.
+The server decides WHAT to show, HOW to show it, WHEN to refresh it, and WHY it is shown. The frontend is a pure rendering layer.
+
+### How it works
 
 ```
-Planner output: plan.ui = [
-  { type: "profile_summary" },
-  { type: "simulation_chart" },
-  { type: "explanation_panel" }
-]
-         │
-Angular DynamicRendererComponent maps type → component
+1. Planner (LLM) → plan.ui = [
+     { type: "simulation_chart", panel_reason: "User asked about retirement feasibility" },
+     ...
+   ]
+
+2. UIComposer (deterministic) → composeUI(plan, state) → A2UI v2 array:
+   [
+     {
+       id:   "simulation_chart-0",
+       type: "simulation_chart",
+       data: { can_retire_at_target: true, projected_savings: 2865086, ... },  ← pre-fetched slice
+       meta: {
+         priority:    "high",
+         layout:      "full_width",
+         position:    0,
+         trigger:     "SIMULATION_UPDATED",     ← WS event that refreshes this panel
+         stage:       "summary",
+         behavior:    { expandOnLoad: true, interactive: true }
+       },
+       insight: {
+         reason:     "User asked about retirement feasibility",  ← WHY (from planner)
+         summary:    "On track — $2.86M projected vs $1.05M required",  ← WHAT (from state)
+         confidence: 0.9
+       },
+       actions: [
+         { label: "Adjust retirement age", action: "EDIT_RETIREMENT_AGE" },
+         { label: "Change savings rate",   action: "EDIT_SAVINGS_RATE"   }
+       ]
+     }
+   ]
+
+3. Angular DynamicRendererComponent → maps type → component, renders comp.data directly
+4. uiContext persisted to Redis → survives page refresh
 ```
 
-UI evolves as data arrives:
+### Component registry (deterministic rules, no LLM)
+
+| Component | Priority | Layout | Stage | Trigger |
+|-----------|----------|--------|-------|---------|
+| `profile_summary` | high | half | summary | PROFILE_UPDATED |
+| `simulation_chart` | high | full_width | summary | SIMULATION_UPDATED |
+| `portfolio_view` | medium | half | detailed | PORTFOLIO_UPDATED |
+| `risk_dashboard` | medium | half | detailed | RISK_UPDATED |
+| `tax_panel` | high | full_width | recommendation | TAX_UPDATED |
+| `cashflow_panel` | medium | full_width | recommendation | CASHFLOW_UPDATED |
+| `explanation_panel` | high | full_width | summary | EXPLANATION_READY |
+
+### UI evolution as data arrives
 
 | Trigger | UI Panels |
 |---------|-----------|
@@ -269,6 +310,8 @@ UI evolves as data arrives:
 | Risk question | + `risk_dashboard`, `portfolio_view` |
 | Tax doc uploaded | + `tax_panel`, simulation updates |
 | Bank statement | + `cashflow_panel`, simulation updates |
+
+**New panels can be added server-side without any frontend deployment.**
 
 ---
 

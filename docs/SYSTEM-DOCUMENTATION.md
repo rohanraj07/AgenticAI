@@ -30,6 +30,7 @@
 21. [Concurrency & Event Ordering](#21-concurrency--event-ordering)
 22. [Hybrid Compute Layer (ReactiveEngine + StateManager)](#22-hybrid-compute-layer-reactiveengine--statemanager)
 23. [Pure-Function Compute Modules](#23-pure-function-compute-modules)
+24. [A2UI v2 — Agent-to-UI Orchestration](#24-a2ui-v2--agent-to-ui-orchestration)
 
 ---
 
@@ -48,6 +49,7 @@ An AI-powered financial planning assistant that analyzes a user's financial situ
 | Real-time streaming | WebSocket events push panel updates to the UI as each agent completes |
 | Session memory | Redis + Markdown + ChromaDB persist context across multiple conversations |
 | PII safety | Raw financial data is never stored — only abstracted signals are persisted |
+| A2UI v2 orchestration | Server controls WHAT/HOW/WHEN/WHY for every UI panel — frontend is a pure renderer |
 
 ### Core Design Principles
 
@@ -56,6 +58,7 @@ An AI-powered financial planning assistant that analyzes a user's financial situ
 3. **Orchestrated Agency** — LangGraph controls execution order deterministically. LLMs only decide *what* to run (planner) and *what to say* (narrative/explanation).
 4. **Reactive Consistency** — The ReactiveEngine listens for upstream state changes (e.g. `PROFILE_UPDATED`) and automatically re-computes all downstream agents (simulation → portfolio → risk) without LLM involvement.
 5. **Graceful Degradation** — Redis falls back to in-memory, ChromaDB falls back to in-memory, every graph node has try/catch so one failing agent cannot crash the pipeline.
+6. **A2UI v2 Orchestration** — The server produces a complete rendering contract per panel (`{id, type, data, meta, insight, actions}`) via `ui.composer.js`. The frontend is a pure rendering layer — it never decides layout, priority, or panel visibility.
 
 ---
 
@@ -2216,3 +2219,122 @@ inflation_spike_impact    = -(projected_savings × 0.05)
 ```
 
 All values are integers in dollars. The LLM receives these as context when writing factor descriptions but cannot change them.
+
+---
+
+## 24. A2UI v2 — Agent-to-UI Orchestration
+
+### Overview
+
+A2UI (Agent-to-UI) is the protocol by which the backend controls the full rendering contract for every UI panel. In v2, the `ui` field in API responses is no longer a flat list of `{type}` strings — it is a rich schema where the server pre-answers four questions per panel:
+
+| Question | Field(s) | Who answers |
+|----------|----------|-------------|
+| **WHAT** to show | `type` | Planner (LLM) |
+| **WHY** it is shown | `insight.reason`, `insight.summary`, `insight.confidence` | Planner `panel_reason` → UIComposer |
+| **HOW** to show it | `meta.priority`, `meta.layout`, `meta.stage`, `meta.behavior` | UIComposer (component registry) |
+| **WHEN** to refresh | `meta.trigger` | UIComposer (component registry) |
+
+### A2UI v2 Schema
+
+```typescript
+interface A2UIComponent {
+  id:   string;         // stable per request: "{type}-{position}"
+  type: string;         // component identifier: "simulation_chart", "tax_panel", etc.
+  data: Record<string, unknown>;   // pre-fetched state slice for this component
+
+  meta: {
+    priority:    'high' | 'medium' | 'low';
+    layout:      'full_width' | 'half' | 'sidebar';
+    position:    number;
+    trigger:     string | null;   // WebSocket event that refreshes this panel
+    stage:       'summary' | 'detailed' | 'recommendation';
+    behavior: {
+      expandOnLoad: boolean;
+      interactive:  boolean;
+    };
+  };
+
+  insight: {
+    reason:     string;   // WHY the panel is shown (from planner rationale)
+    summary:    string;   // WHAT the data shows (derived from state)
+    confidence: number;   // 0.0–1.0
+  };
+
+  actions: { label: string; action: string }[];
+}
+```
+
+### UIComposer — `backend/engine/ui.composer.js`
+
+The UIComposer is a deterministic function — no LLM, no async, no randomness:
+
+```javascript
+composeUI(plan, state) → A2UIComponent[]
+```
+
+**Inputs**:
+- `plan` — planner output with `{ui[], confidence, decision_rationale}`
+- `state` — current session state `{profile, simulation, portfolio, risk, tax, cashflow}`
+
+**Steps per component**:
+1. Look up `REGISTRY[type]` → static display rules
+2. Call `extractData(type, state)` → pull the relevant state slice
+3. Call `buildInsight(type, plan, state)` → derive reason + summary from state
+4. Assemble the final A2UIComponent object
+
+**Component registry (hardcoded, never changes at runtime)**:
+
+```javascript
+const REGISTRY = {
+  profile_summary:   { priority: 'high',   layout: 'half',       trigger: 'PROFILE_UPDATED',    expandOnLoad: false, interactive: false },
+  simulation_chart:  { priority: 'high',   layout: 'full_width', trigger: 'SIMULATION_UPDATED', expandOnLoad: true,  interactive: true  },
+  portfolio_view:    { priority: 'medium', layout: 'half',       trigger: 'PORTFOLIO_UPDATED',  expandOnLoad: false, interactive: true  },
+  risk_dashboard:    { priority: 'medium', layout: 'half',       trigger: 'RISK_UPDATED',       expandOnLoad: false, interactive: false },
+  tax_panel:         { priority: 'high',   layout: 'full_width', trigger: 'TAX_UPDATED',        expandOnLoad: true,  interactive: false },
+  cashflow_panel:    { priority: 'medium', layout: 'full_width', trigger: 'CASHFLOW_UPDATED',   expandOnLoad: false, interactive: false },
+  explanation_panel: { priority: 'high',   layout: 'full_width', trigger: 'EXPLANATION_READY',  expandOnLoad: true,  interactive: false },
+}
+```
+
+### Insight builders — state-derived summaries
+
+Each component has a dedicated insight builder that derives a human-readable summary from the current state. This is deterministic (not LLM):
+
+| Component | Insight summary example |
+|-----------|------------------------|
+| `simulation_chart` | `"On track — $2.86M projected vs $1.05M required"` |
+| `profile_summary` | `"Alex, age 35 — target retirement at 65 (30 years away)"` |
+| `portfolio_view` | `"Balanced strategy — 60% equities, 6.6% expected annual return"` |
+| `risk_dashboard` | `"Risk score 5/10 (medium) — $144k exposed in 20% market crash"` |
+| `tax_panel` | `"22% bracket — efficiency 7/10, 3 optimization strategies identified"` |
+| `cashflow_panel` | `"Good budget health — MODERATE savings rate, spending level ELEVATED"` |
+
+### Session persistence
+
+After each pipeline run, `uiContext` (the full A2UIComponent array) is persisted to Redis:
+
+```javascript
+await redisMemory.updateSession(sessionId, { uiContext: richUI });
+```
+
+This means the frontend can reconstruct the last rendered state on page refresh without re-running the pipeline.
+
+### Frontend contract
+
+The Angular frontend treats the A2UI v2 array as a **read-only rendering contract**. It does not:
+- Decide which panels to show (server decides)
+- Compute layout or priority (registry decides)
+- Fetch data for panels (data is pre-fetched in `comp.data`)
+
+The `DynamicRendererComponent` renders each component using `comp.data` directly and surfaces `comp.insight.reason` as the "Why am I seeing this?" tooltip per panel.
+
+### Adding a new panel (zero frontend changes)
+
+1. Add the component to `REGISTRY` in `ui.composer.js`
+2. Add a case in `buildInsight()` for the insight summary
+3. Add a case in `extractData()` for the data slice
+4. The planner prompt already lists all available panels — add the new type to that list
+5. Deploy backend only
+
+The frontend will render the new panel automatically since it maps `type → Angular component` and the Angular component for that type already exists (or is added in a separate frontend PR).

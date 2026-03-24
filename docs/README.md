@@ -63,7 +63,7 @@ npm start
 User Message
     │
     ▼
-Planner (LLM) ── intent + UI decisions only
+Planner (LLM) ── intent + panel list (with panel_reason per panel)
     │
     ▼
 Profile (LLM) ── entity extraction
@@ -81,6 +81,14 @@ Risk ── risk.compute.js (math) → LLM factor text
     │
     ▼
 Explanation (LLM) ── synthesises all computed state → plain text
+    │
+    ▼
+UIComposer (deterministic) ── composeUI(plan, state) → A2UI v2 schema
+    { id, type, data, meta:{priority,layout,trigger,stage,behavior},
+      insight:{reason,summary,confidence}, actions[] }
+    │
+    ▼
+Angular DynamicRenderer ── renders components from schema
 
 ── (parallel, event-driven) ──────────────────────────────────────
 ReactiveEngine ── recomputes simulation/portfolio/risk on any
@@ -99,6 +107,9 @@ ReactiveEngine ── recomputes simulation/portfolio/risk on any
 | Can two runs produce different numbers? | No — compute functions are pure |
 | Where is the single source of truth? | `StateManager` (in-process) + `Redis` (durable) |
 | Is raw PII ever stored? | No — sanitized to range labels before any storage |
+| Who decides UI layout, priority, trigger? | `ui.composer.js` — deterministic component registry |
+| What does the frontend render? | A2UI v2 schema: `{id, type, data, meta, insight, actions}` |
+| Can new panels be added without frontend deploy? | Yes — UIComposer registry is server-side only |
 
 ---
 

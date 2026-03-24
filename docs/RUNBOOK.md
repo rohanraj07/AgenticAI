@@ -137,15 +137,31 @@ curl -X POST http://localhost:3000/api/chat \
   -d '{"message": "Can I retire at 55?", "sessionId": "optional-uuid"}'
 ```
 
-Response:
+Response (A2UI v2 — each panel includes data, layout, insight, and actions):
 ```json
 {
   "sessionId": "uuid",
   "message": "Based on your projected $4.3M in savings...",
   "ui": [
-    { "type": "profile_summary" },
-    { "type": "simulation_chart" },
-    { "type": "explanation_panel" }
+    {
+      "id": "simulation_chart-1",
+      "type": "simulation_chart",
+      "data": { "can_retire_at_target": true, "projected_savings_at_retirement": 4347122, "..." : "..." },
+      "meta": {
+        "priority": "high", "layout": "full_width", "position": 1,
+        "trigger": "SIMULATION_UPDATED", "stage": "summary",
+        "behavior": { "expandOnLoad": true, "interactive": true }
+      },
+      "insight": {
+        "reason": "User asked about retirement feasibility",
+        "summary": "On track — $4.35M projected vs $1.05M required",
+        "confidence": 0.9
+      },
+      "actions": [
+        { "label": "Adjust retirement age", "action": "EDIT_RETIREMENT_AGE" },
+        { "label": "Change savings rate",   "action": "EDIT_SAVINGS_RATE"   }
+      ]
+    }
   ],
   "data": {
     "profile":    { "age": 35, "income": 80000, ... },

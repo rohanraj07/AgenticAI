@@ -85,24 +85,58 @@ This answers the critical question: "If income changes, can you guarantee simula
 
 ---
 
-### Pattern 3 — A2UI (Agent-to-UI Dynamic Rendering)
+### Pattern 3 — A2UI v2 (Agent-to-UI Orchestration)
 
-The server decides what the UI shows. The frontend is a pure rendering layer.
+The server answers four questions for every UI panel. The frontend renders what it is told.
+
+| Question | Answered by |
+|----------|------------|
+| **WHAT** to show | Planner (LLM intent classification) |
+| **WHY** it is shown | Planner `panel_reason` → UIComposer `insight.reason` |
+| **HOW** to show it | UIComposer: `layout`, `priority`, `expandOnLoad`, `interactive` |
+| **WHEN** to refresh | UIComposer: `trigger` (WebSocket event name) |
 
 ```
 Planner LLM output:
   plan.ui = [
-    { type: "profile_summary" },
-    { type: "simulation_chart" },
-    { type: "tax_panel" }
+    { type: "simulation_chart", panel_reason: "User asked about retirement feasibility" },
+    { type: "tax_panel",        panel_reason: "Tax document signals detected" }
+  ]
+         │
+UIComposer (deterministic — no LLM):
+  composeUI(plan, state) →
+  [
+    {
+      id: "simulation_chart-0",
+      type: "simulation_chart",
+      data: { can_retire_at_target: true, projected_savings: 2865086, ... },
+      meta: { priority: "high", layout: "full_width", trigger: "SIMULATION_UPDATED",
+              behavior: { expandOnLoad: true, interactive: true } },
+      insight: { reason: "User asked about retirement feasibility",
+                 summary: "On track — $2.86M projected vs $1.05M required",
+                 confidence: 0.9 },
+      actions: [{ label: "Adjust retirement age", action: "EDIT_RETIREMENT_AGE" }]
+    },
+    {
+      id: "tax_panel-1",
+      type: "tax_panel",
+      data: { tax_efficiency_score: 7, tax_bracket: "22%", ... },
+      meta: { priority: "high", layout: "full_width", trigger: "TAX_UPDATED",
+              behavior: { expandOnLoad: true, interactive: false } },
+      insight: { reason: "Tax document signals detected",
+                 summary: "22% bracket — efficiency 7/10, 3 strategies identified",
+                 confidence: 0.85 },
+      actions: [{ label: "View all strategies", action: "EXPAND_TAX_STRATEGIES" }]
+    }
   ]
          │
 Angular DynamicRendererComponent:
-  maps type → Angular component
-  renders Tax panel + Simulation chart + Profile summary
+  renders each comp using comp.data (pre-fetched, no re-fetch needed)
+  shows comp.insight.reason as "Why am I seeing this?" per panel
+  uiContext persisted to Redis — survives page refresh
 ```
 
-Different users see different UI. New panels can be added without frontend deploys.
+**Different users see different UI. New panels, layouts, and actions are server-side changes only — zero frontend deploys.**
 
 ---
 
