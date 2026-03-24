@@ -1,109 +1,150 @@
-# Demo Script — AI Financial Planner
-> Presenter voice. Hackathon edition.
-> Total runtime: 8–10 minutes. Practice it until it's 7.
+# Demo Script — AI Financial Planner (Hackathon Edition)
+> Presenter voice. 10–12 minutes. Every line is a choice.
+> Practice until it's 9 minutes. Leave room for applause.
 
 ---
 
-## Pre-Demo Checklist (5 minutes before)
+## Pre-Demo Setup (10 minutes before)
 
 ```bash
-# Terminal 1 — backend with visible logs
+# ── Terminal layout ─────────────────────────────────────────────────────
+# Split screen: Browser 65% left · Terminal logs 35% right
+# Font: Terminal 18pt · Browser 115% zoom — back row must read the logs
+
+# Reset all state (clean demo every time)
+rm -f backend/data/sessions/*.md
+redis-cli FLUSHALL 2>/dev/null || echo "Redis not running — in-memory fallback OK"
+
+# Start backend (logs visible on right)
 cd backend && npm run dev
 
-# Terminal 2 — frontend
+# Start frontend (separate terminal, hidden)
 cd frontend && npm start
 
-# Browser tabs pre-opened:
-#   Tab 1: http://localhost:4200   (app — full screen)
-#   Tab 2: DevTools Network tab    (pre-opened, filter: /api)
-#   Tab 3: Terminal with logs      (visible on second monitor or split)
+# Pre-open browser tabs
+# Tab 1: http://localhost:4200         ← LIVE (main demo tab)
+# Tab 2: DevTools → Network → /api    ← ready to switch to
+# Tab 3: File explorer at backend/data/sessions/
 
-# Reset any prior session state
-rm -f backend/data/sessions/*.md
-redis-cli FLUSHALL 2>/dev/null || true
-
-# Sample files ready to drag-drop
-open backend/data/   # confirm sample-tax-document.txt and sample-bank-statement.txt exist
+# Confirm sample files exist
+ls backend/data/sample-tax-document.txt backend/data/sample-bank-statement.txt
 ```
 
-**Font size**: terminal 18pt, browser 110% zoom. Everyone in the back must read it.
-
-**Split your screen**: Browser left (70%) · Terminal logs right (30%).
+**Screen arrangement:**
+```
+┌─────────────────────────────────┬──────────────────┐
+│                                 │                  │
+│   http://localhost:4200         │  Backend Logs    │
+│   (app — main demo surface)     │  (npm run dev)   │
+│                                 │                  │
+└─────────────────────────────────┴──────────────────┘
+```
 
 ---
 
-## The Setup — What to Say Before Touching the Keyboard
+## MINUTE 0:00–1:00 — The Problem
 
-> *"Every AI financial tool does the same thing: you ask a question, the AI generates an answer. Sometimes the numbers are right. Sometimes they're not. And you have no way to tell the difference."*
+*[Stand away from keyboard. Eye contact with audience.]*
 
-> *"We built something different. This is not an AI that gives you answers. This is a financial engine where AI orchestrates the experience — and math provides the guarantees."*
+> **"Let me start with a question. How many of you have used an AI chatbot to plan your finances?"**
 
-> *"Let me show you exactly what that means."*
+*[Wait for hands.]*
+
+> **"How many of you trusted the numbers it gave you?"**
+
+*[Pause — let the awkward silence work.]*
+
+> **"That's the problem. Every AI financial tool today does the same thing: you ask a question, the model generates an answer. Sometimes the numbers are right. Sometimes they're made up. And you have no way to tell the difference — because the AI that wrote the sentence is the same AI that invented the number."**
+
+*[Walk to keyboard.]*
+
+> **"We built something fundamentally different. This is not an AI that gives you answers. This is a financial engine where AI orchestrates the experience — and math provides the guarantees."**
+
+> **"Let me show you exactly what that means."**
 
 ---
 
-## ACT 1 — The First Question (90 seconds)
+## MINUTE 1:00–1:45 — System Architecture (30-second version)
 
-### What you do
-Type in the chat: **"I'm 32 years old, make $95,000 a year, have $60,000 saved, and want to retire at 60. Can I do it?"**
+*[Point at terminal logs on the right — backend already running.]*
 
-Hit Send.
+> **"Before I touch the chat, let me orient you to what's happening under the hood."**
 
-### What happens (watch the logs right side)
+*[Draw in the air or point at an invisible whiteboard:]*
+
+> **"User asks a question. A planner agent — powered by an LLM — classifies intent and decides which UI panels to show. Then specialist agents run. But here's the key: when those agents need financial numbers, they do NOT ask the LLM. They call deterministic math functions. Compound interest. Glide-path allocation. 3-factor risk scoring."**
+
+> **"The LLM writes the sentences. Math writes the numbers. Code writes the rules. And a UI composer — also deterministic — builds a rich rendering schema that tells the frontend exactly what to show, how to show it, and why."**
+
+> **"Let's see it."**
+
+---
+
+## MINUTE 1:45–3:30 — ACT 1: "Can I retire at 55?" — The First Wow
+
+### What you type
 ```
-[ReactiveEngine] seeded session=... from Redis
-[Agent] PlannerAgent — intent: Retirement feasibility check
-[Agent] ProfileAgent — extracted profile
-[Agent] SimulationAgent [1/2] deterministic projection
-[Agent]   Projected savings: $X,XXX,XXX   ← point at this
-[Agent] SimulationAgent [2/2] LLM summary
+I'm 34 years old, make $110,000 a year, have $85,000 saved,
+and spend about $4,500 a month. I want to retire at 60. Can I?
 ```
+
+*[Click send. Point immediately to the logs on the right.]*
 
 ### What to say while it loads
-> *"Watch the right side. The agent pipeline is running. Profile agent extracted the numbers I just typed. Now — this is important — the simulation agent is not asking an AI 'what will my savings be?' It's running compound interest math. That number you see in the logs is the same number you'll see every single time for these inputs."*
+
+> **"Watch the logs. The planner classified my intent — retirement feasibility check. Profile agent extracted the numbers I just typed — age, income, savings, spending. Now — this is the moment — the simulation agent is running."**
+
+*[Point at this log line as soon as it appears:]*
+```
+[Agent] SimulationAgent [1/2] deterministic projection
+[Agent]   Projected savings: $X,XXX,XXX
+```
+
+> **"That number. Right there. That is compound interest — future value formula. $85,000 present value, growing at 7% annually, plus $3,542 in monthly contributions for 26 years. Not generated by the LLM. Calculated."**
 
 ### When the panels appear
-Point at the simulation chart first.
 
-> *"There it is. Projected savings, required savings, the gap — all computed deterministically. The AI wrote this summary sentence, but it didn't compute a single dollar of that number."*
+*[Point at the simulation chart first.]*
 
-Point at the profile panel.
+> **"Simulation panel. Projected savings, required savings at retirement, the gap between them. Three milestones."**
 
-> *"Profile panel — extracted from my natural language. I said '32 years old, $95k, $60k saved' — no form, no form fields."*
+*[Point at the profile panel.]*
 
-Point at the explanation panel.
+> **"Profile panel — extracted from my natural language. No form. No dropdowns."**
 
-> *"And the explanation agent synthesised everything into plain English. This is the only part that varies between runs. The numbers? Never."*
+*[Point at the explanation panel — read the first sentence.]*
 
-**Pause. Let it breathe.**
+> **"And the explanation synthesised all of it into plain English. Only this sentence was written by the AI. The number it's citing? Pure math."**
 
-> *"Let me prove it."*
+### The prediction moment ⭐
 
-### The proof moment — run it again
-Type the EXACT same message again.
+> **"I'm going to prove something. Watch this number."**
 
-> *"Same message. Watch the number."*
+*[Read the projected savings figure out loud.]*
 
-Point at the logs — same projected savings figure appears.
+> **"I'm going to send the exact same message again."**
 
-> *"$X,XXX,XXX. Identical. You cannot get a different number for the same inputs. The AI cannot hallucinate a projection in this system."*
+*[Type the exact same message. Send.]*
+
+> **"Same number. Every time. For the same inputs, this system produces the same output. Always. The AI cannot hallucinate a projection — because the AI never computed it."**
+
+*[Pause two full seconds.]*
 
 ---
 
-## ACT 2 — The A2UI Reveal (90 seconds)
+## MINUTE 3:30–5:30 — ACT 2: The A2UI Reveal — "What no one else is doing"
 
-> *"Now let me show you something most AI demos never show you — the API response."*
+> **"Now I want to show you something that most AI demos never show you. The actual API response."**
 
-### Switch to Network tab
-Click on the `/api/chat` request → Response tab.
+*[Switch to Network tab in DevTools. Click the last /api/chat request. Open Response.]*
 
-Zoom into the `ui` array.
+*[Zoom in on the `ui` array.]*
 
-> *"Most systems return a flat list like `[{type: 'simulation_chart'}]`. That's it. The frontend figures out the rest."*
+> **"Most AI systems return something like this: `[{type: 'chart'}]`. That's it. The frontend decides everything else."**
 
-> *"We return this."*
+> **"Look at what we return."**
 
-Scroll through one component slowly — point at each field:
+*[Slowly scroll through one component. Point at each field.]*
 
 ```json
 {
@@ -111,7 +152,7 @@ Scroll through one component slowly — point at each field:
   "type": "simulation_chart",
   "loading": false,
   "version": 4,
-  "data": { "projected_savings_at_retirement": ... },
+  "data": { "projected_savings_at_retirement": 2865086, "..." },
   "meta": {
     "priority": "high",
     "layout": "full_width",
@@ -119,7 +160,7 @@ Scroll through one component slowly — point at each field:
   },
   "insight": {
     "reason": "User asked about retirement feasibility",
-    "summary": "On track — $X.XM projected vs $X.XM required",
+    "summary": "On track — $2.86M projected vs $1.05M required",
     "confidence": 0.9
   },
   "actions": [
@@ -128,28 +169,40 @@ Scroll through one component slowly — point at each field:
 }
 ```
 
-> *"The server answers four questions for every single panel:"*
+> **"The server answers four questions for every single panel:"**
 
-Point at each field as you say it:
-> - `insight.reason` — **WHY** is this panel here?
-> - `insight.summary` — **WHAT** does the data show?
-> - `meta.priority + meta.layout` — **HOW** should it look?
-> - `meta.trigger` — **WHEN** does it refresh?
+*[Point as you say each line:]*
 
-> *"The frontend renders what it's told. It has zero opinion about layout, zero opinion about which panels are relevant. A new panel can be added to this system without a single frontend change — it's a server-side config update."*
+- `insight.reason` → **"WHY is this panel here?"**
+- `insight.summary` → **"WHAT does it show?"**
+- `meta.priority + meta.layout` → **"HOW should it look?"**
+- `meta.trigger` → **"WHEN should it refresh?"**
 
-> *"We call this A2UI — Agent-to-UI. The agent orchestrates the interface, not just the answer."*
+> **"We call this A2UI — Agent-to-UI. The agent doesn't just answer your question. It orchestrates your entire UI experience."**
+
+> **"See this `version: 4`? Every time state changes, this number increments. The client rejects any response with a version lower than what it's already rendered. No stale data. No flash of incorrect content."**
+
+> **"And see `trigger: SIMULATION_UPDATED`? That's a WebSocket event name. When the reactive engine recomputes simulation in the background, it emits that event, and only that panel refreshes. Surgically. No full-page reload."**
+
+> **"The frontend has zero opinion about any of this. It renders what the server tells it."**
+
+> **"New business logic — new panel type, new layout rule — is a backend deploy only. The Angular app doesn't know. Doesn't need to."**
 
 ---
 
-## ACT 3 — The Reactive Engine (60 seconds)
+## MINUTE 5:30–7:00 — ACT 3: The Reactive Engine — "The 2ms moment"
 
-> *"Now watch what happens when data changes."*
+> **"Now watch what happens when data changes."**
 
-### What you do
-Type: **"Actually, I just got a raise. My income is now $120,000."**
+*[Switch back to the app.]*
 
-### Point at logs immediately
+### Type in chat:
+```
+Actually I just got promoted. My salary is now $145,000.
+```
+
+*[Click send. IMMEDIATELY point to logs on the right.]*
+
 ```
 [ReactiveEngine] PROFILE_UPDATED → FULL cascade | agents=[simulation, portfolio, risk]
 [ReactiveEngine] ✔ simulation recomputed (2ms)
@@ -157,223 +210,308 @@ Type: **"Actually, I just got a raise. My income is now $120,000."**
 [ReactiveEngine] ✔ risk recomputed (1ms)
 ```
 
-> *"2 milliseconds. That's not an AI call. That's math."*
+> **"2 milliseconds."**
 
-> *"When income changed, the system automatically re-ran simulation, portfolio allocation, and risk score. I didn't ask it to. No prompt told it to. It's a hardcoded dependency graph — `PROFILE_UPDATED` always triggers those three, in that order, every time."*
+*[Pause.]*
 
-> *"The panels just updated. Notice the simulation chart shifted. The numbers moved. All in under 10ms total."*
+> **"That is not an AI call. That's math."**
 
-> *"If this was an LLM making those decisions, it would cost 3-5 seconds and could forget to recompute risk. We guarantee recomputation in code, not in a prompt."*
+> **"When income changed, the reactive engine automatically re-ran the retirement projection, recalculated the portfolio allocation, and updated the risk score. I didn't ask it to. There was no prompt like 'please also update my risk score'. The system enforces this."**
+
+> **"It's a hardcoded dependency graph: `PROFILE_UPDATED` ALWAYS triggers simulation, portfolio, and risk — in that order — every time. It cannot be skipped. It cannot be forgotten. The LLM has no control over this."**
+
+*[Point at updated panels.]*
+
+> **"Panels updated. New salary, new projection, new allocation. All in under 5ms total."**
+
+> **"And if I send three income changes at once —"**
+
+*[Quickly type three short messages:]*
+```
+Income is $120k
+No wait, $130k
+Actually $140k
+```
+
+*[Point at logs:]*
+```
+[ReactiveEngine] PROFILE_UPDATED → FULL cascade
+[StaleGuard] cancelled stale cascade (priority=1) for higher-priority event
+[ReactiveEngine] queued PROFILE_UPDATED (cascade in progress)
+[ReactiveEngine] ✔ simulation recomputed (2ms)
+```
+
+> **"The stale guard cancelled the first cascade when the second arrived. Events were coalesced. One final result. No wasted computation. No race condition."**
 
 ---
 
-## ACT 4 — The Document Upload + Trust Story (2 minutes)
+## MINUTE 7:00–9:00 — ACT 4: Document Upload — "The Trust Moment"
 
-> *"Now for the most important part of this demo."*
+> **"Now for the most important part of this demo. Financial planning means sensitive documents."**
 
-> *"Financial planning means sensitive documents. Tax returns. Bank statements. The standard approach: upload the file, store it, run analysis. We did something different."*
+*[Drag `sample-tax-document.txt` to the upload zone.]*
 
-### Drag and drop `sample-tax-document.txt`
+*[While it processes:]*
 
-While it uploads:
-> *"File is uploading. In-memory only. The moment this request ends, the raw file is gone."*
+> **"The file just landed in memory. It will never touch disk. That's not a setting — that's `multer.memoryStorage()`. There is no file system path. There is no disk write. The moment this HTTP request ends, the bytes are gone."**
 
-### When panels update — point at tax panel
-> *"Tax panel appeared. The system analysed the document — found a 22% tax bracket, upper-middle income range, identified three optimisation strategies."*
+### When the tax panel appears
 
-> *"But I want to show you something."*
+> **"Tax panel. 22% bracket. Efficiency score 7 out of 10. Three optimisation strategies."**
 
-### Open a new terminal tab
+*[Open a terminal tab. Navigate to backend/data/sessions/.]*
+
 ```bash
 cat backend/data/sessions/<sessionId>.md
 ```
 
-Point at the file contents:
+*[Project the file contents. Point at income field.]*
 
-> *"This is everything we stored about that document. Look at the income field."*
+> **"This is everything we stored about that document."**
 
-Point at `income_range: UPPER_MIDDLE`
+> **"Income range: UPPER_MIDDLE."**
 
-> *"Not $145,000. `UPPER_MIDDLE`. The exact figure never left memory."*
+> **"Not $145,000. Not the gross income from the W-2. A range label. The exact figure was processed in a local variable, abstracted, and the variable was garbage collected. There is no API endpoint that returns the raw number. There is no admin panel where someone can look it up. The architecture prevents it — not a policy, not a checkbox in a compliance document — the code prevents it."**
 
-> *"Look for an SSN. Look for an account number."*
+*[Look for SSN in the file.]*
 
-Point at the file.
+> **"Look for a social security number. Look for an account number."**
 
-> *"It's not there. Because the pipeline doesn't expose a path for it. The PII sanitizer runs synchronously, in the same function call as extraction, before anything async touches the data. You cannot store raw PII even if you wanted to — the architecture prevents it."*
+*[Pause.]*
 
-**Pause.**
+> **"Not there. Because the extraction pipeline never wrote it anywhere it could reach Redis."**
 
-> *"This is trust-by-design. Not trust-by-policy."*
+*[Point at the conflict resolver log:]*
 
-### Now show the conflict resolution moment
-> *"Here's something subtle. Before the upload, I said my income was $95k. The tax document implied upper-middle income — higher. Watch what our conflict resolver did."*
-
-Point at logs:
 ```
-[ConflictResolver] field="income" resolved → source=document_extracted confidence=1
+[ConflictResolver] field="income" resolved → source=document_extracted confidence=1.0
 [ConflictResolver] mergeProfiles complete — source=document_extracted
 [ConflictResolver] scoreDataQuality → 0.857
 ```
 
-> *"Document data outranks what you typed. Not because an AI decided that — because we defined a precedence table: document_extracted beats user_stated beats inferred. The simulation automatically updated with the higher-confidence data."*
+> **"And when the document said something about income that conflicted with what I typed in chat — the document won. Not because an AI decided that. Because we defined a precedence table: document-extracted data outranks user-stated data, which outranks inferred data."**
+
+> **"Deterministic. Auditable. The same decision every time."**
 
 ---
 
-## ACT 5 — The Priority Queue (45 seconds)
+## MINUTE 9:00–10:00 — ACT 5: Multi-modal + Memory — "Upload then Ask"
 
-> *"One more thing I want to show you — what happens under load."*
+*[Drag `sample-bank-statement.txt` to upload zone.]*
 
-### What you do
-Type three messages in rapid succession (don't wait for responses):
-1. **"Change my retirement age to 55"**
-2. **"Actually make it 58"**
-3. **"No, 56 is better"**
+> **"Bank statement."**
 
-### Point at logs
-```
-[ReactiveEngine] PROFILE_UPDATED → FULL cascade | session=...
-[ReactiveEngine] queued PROFILE_UPDATED (cascade in progress) session=...
-[ReactiveEngine] queued PROFILE_UPDATED (cascade in progress) session=...
-[ReactiveEngine] ✔ simulation recomputed (2ms)
-... (one more cascade runs after first completes)
-```
+*[While it processes:]*
 
-> *"Three profile updates. The system ran exactly two cascades — not three. The second and third events were coalesced into one. Same result. Less compute."*
+> **"Spending patterns. Budget health. No transaction data stored — only category-level signals."**
 
-> *"And if a profile update and a tax update arrive at the same time — the profile update goes first. It's higher priority. The system processes `PROFILE_UPDATED` before `TAX_UPDATED`, always, because a profile change cascades to more downstream agents."*
-
-> *"This is a priority queue with deduplication. Not something you'd typically build in a hackathon POC — but it's what makes this production-ready."*
-
----
-
-## ACT 6 — The Bank Statement (30 seconds)
-
-### Drag and drop `sample-bank-statement.txt`
-
-> *"Bank statement."*
-
-Wait for cashflow panel to appear.
-
-> *"Cashflow panel. Spending level, savings rate, budget health, three recommendations. All from abstracted signals — not transaction data. The raw statement is already gone."*
-
-> *"Now ask a follow-up question."*
-
-Type: **"What's the single most important thing I should change to retire 3 years earlier?"**
-
-> *"Watch this — it remembers everything. The tax insights, the cashflow signals, the profile, the simulation. It's using all of it to answer. No re-upload. No re-prompting. The session state is the memory."*
-
----
-
-## ACT 7 — The Close (60 seconds)
-
-> *"Let me tell you what we did NOT do."*
-
-> *"We did not let an AI compute your savings projections. That's a math problem — we solved it with math."*
-
-> *"We did not let an AI decide your UI layout. That's a design problem — we solved it with a component registry."*
-
-> *"We did not let an AI choose which panels to refresh when income changes. That's a dependency problem — we solved it with a graph."*
-
-> *"And we did not let an AI decide whose data wins when you type one thing and your tax return says another. That's a trust problem — we solved it with a precedence table."*
-
-**Pause. Step back from the keyboard.**
-
-> *"What we did let the AI do: understand what you meant, explain what it found, and tell the UI what to show and why."*
-
-> *"That's the boundary. And when you draw that boundary clearly, you get something most AI systems never achieve — a system that is reactive, consistent, deterministic where it needs to be, and explainable at every step."*
-
-> *"We call it an A2UI orchestration platform. The agent doesn't just answer your question. It orchestrates your entire experience."*
-
-> *"Thank you."*
-
----
-
-## Backup Moments (if judges ask questions)
-
-### "How is this different from just hardcoding the UI?"
-> *"The planner LLM decides WHICH panels are relevant to the user's question. If someone asks about taxes, the planner includes the tax panel. If they ask about investments, it includes portfolio. The server decides HOW to display it — layout, priority, actions. New business logic (new panel, new trigger) is a server deploy, never a frontend deploy."*
-
-### "What if the LLM is wrong about which panels to show?"
-> *"The planner has guardrails enforced in code — `explanation` is always present, `portfolio` always requires `simulation` first, `risk` always requires `portfolio`. The LLM can choose from the list, but code enforces the constraints. And there's a `SAFE_DEFAULT_PLAN` fallback if the chain fails entirely."*
-
-### "What about real financial data? This is sample data."
-> *"The architecture is designed for real integrations. Swap `financial.calculator.js` with a Bloomberg or Morningstar API — same interface, same cascade. Swap the LLM with a fine-tuned model — same prompts. The compute layer is completely pluggable."*
-
-### "Why not just use an LLM for everything?"
-> *"Because $2,865,086 should not be a matter of opinion. When you ask an LLM to calculate compound interest, it gives you a different answer every time — and the answers are often wrong. We use the LLM for what it's genuinely good at: understanding language and explaining results. Math is for math."*
-
-### "What's the biggest technical risk?"
-> *"The single process state manager doesn't scale horizontally. In production you'd replace `StateManager._store` with a Redis hash — same interface. We designed for that swap explicitly. The reactive engine would work identically with shared Redis state."*
-
----
-
-## Technical Highlights Card (for judge handout or slide)
+### When cashflow panel appears — type:
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  AI Financial Planner — Technical Summary               │
-├─────────────────────────────────────────────────────────┤
-│  A2UI v2 Protocol                                        │
-│  Server returns: {id, type, data, meta, insight,        │
-│    actions, version} per panel                          │
-│  WHAT/WHY/HOW/WHEN answered by backend — not frontend   │
-├─────────────────────────────────────────────────────────┤
-│  Deterministic Compute                                   │
-│  Projection = FV formula, not LLM                       │
-│  Risk score = 3-factor formula, not LLM                 │
-│  Portfolio = glide-path formula, not LLM                │
-│  Same inputs → same numbers, always                     │
-├─────────────────────────────────────────────────────────┤
-│  Reactive Engine (zero LLM)                             │
-│  PROFILE_UPDATED → FULL cascade (sim+portfolio+risk)    │
-│  TAX_UPDATED → PARTIAL cascade (sim only)               │
-│  Each step: ~1–3ms deterministic                        │
-├─────────────────────────────────────────────────────────┤
-│  Priority Event Queue                                    │
-│  HIGH(1)=PROFILE, MEDIUM(2)=TAX/CASHFLOW, LOW(3)=UI    │
-│  Coalescing: 3× same event → 1 cascade entry           │
-│  No overlapping cascades per session                    │
-├─────────────────────────────────────────────────────────┤
-│  Conflict Resolution                                     │
-│  document_extracted(4) > user_stated(3) > inferred(2)  │
-│  Data quality score: 0.0–1.0 per session               │
-├─────────────────────────────────────────────────────────┤
-│  Trust-by-Design (not trust-by-policy)                  │
-│  Raw file: in-memory buffer only, never on disk         │
-│  PII abstracted in same function call as extraction     │
-│  Stored: income_range="UPPER_MIDDLE" not $145,000       │
-│  Architecture prevents PII storage — no bypass path    │
-├─────────────────────────────────────────────────────────┤
-│  Stack: LangGraph + LangChain · Angular 17 · Node.js   │
-│  LLM: Groq/Gemini/OpenAI/Ollama (priority chain)       │
-│  State: Redis (versioned) + in-process StateManager    │
-│  Memory: Redis + ChromaDB + Markdown                    │
-└─────────────────────────────────────────────────────────┘
+Given everything you know about me — my tax situation,
+my spending, and my income — what's the single most
+impactful change I can make to retire 3 years earlier?
 ```
+
+*[While it processes — say:]*
+
+> **"This question requires knowing about the tax document, the bank statement, and the retirement projection simultaneously. It's using all of it. Session memory — Redis, ChromaDB, Markdown context. No re-upload. No re-prompting."**
+
+*[When answer appears:]*
+
+> **"The system remembered the tax insights. The cashflow signals. The profile. The simulation. This is stateful financial planning — not a stateless chatbot that forgets everything between messages."**
+
+---
+
+## MINUTE 10:00–11:00 — ACT 6: Architecture Flex — "Show the engine"
+
+> **"Let me show you the engine one more time."**
+
+*[Point to logs. Scroll up to show the full pipeline from the last request:]*
+
+```
+[ReactiveEngine] PROFILE_UPDATED → FULL cascade | agents=[simulation, portfolio, risk]
+[SchemaValidator] ✔ session write validated — keys=[simulation]
+[SchemaValidator] ✔ session write validated — keys=[portfolio]
+[StaleGuard] registered cascade priority=1 session=...
+[StateManager] session=... patched keys=[simulation] version=9
+[Agent] SimulationAgent [1/2] deterministic projection
+[Agent]   Projected savings: $2,865,086
+[Agent] SimulationAgent [2/2] LLM narrative generation
+[ConflictResolver] scoreDataQuality → 0.857
+```
+
+> **"Every line is a guarantee:"**
+
+- `SchemaValidator` → **"No PII reached Redis"**
+- `StateManager version=9` → **"Every write is versioned — the client knows if it's stale"**
+- `SimulationAgent [1/2] deterministic` → **"Numbers came from math"**
+- `[2/2] LLM narrative` → **"Sentences came from the model"**
+- `ConflictResolver scoreDataQuality` → **"Data quality is scored and surfaced"**
+
+> **"This is not a demo system. Every one of these mechanisms is enforced in code, not described in a README."**
+
+---
+
+## MINUTE 11:00–12:00 — The Close
+
+*[Step back from keyboard. Slow down.]*
+
+> **"Let me tell you what we deliberately did NOT build."**
+
+> **"We did not let an AI calculate your retirement projection. That is a math problem — we solved it with the future value formula."**
+
+> **"We did not let an AI decide which UI panels to refresh when income changes. That is a dependency problem — we solved it with a dependency graph."**
+
+> **"We did not let an AI choose which data source wins when your tax document contradicts what you typed. That is a conflict resolution problem — we solved it with a precedence table."**
+
+> **"We did not let an AI decide whether to store your gross income. That is a trust problem — we solved it with a schema validator that throws an exception before any write."**
+
+*[One beat.]*
+
+> **"What we did let the AI do: understand what you meant. Explain what it found. Decide which panels are relevant. And write the sentences that wrap the math."**
+
+> **"That is the boundary. Draw it clearly, enforce it in code, and you get something most AI systems never achieve: a system that is reactive, consistent, deterministic where it has to be, and explainable at every step."**
+
+*[Final line — make it land.]*
+
+> **"Every other AI system gives you a smart answer. This one gives you a smart interface. The agent orchestrates your experience — not just your response."**
+
+> **"Thank you."**
+
+---
+
+## Audience Hooks — Prediction Moments (Use During Demo)
+
+Plant these before they happen — it creates engagement:
+
+| Before doing | Say |
+|-------------|-----|
+| Sending same message twice | *"Predict the number. Same input — what should the output be?"* |
+| Opening Network tab | *"Who wants to see what a real AI API response looks like?"* |
+| Changing income | *"Hands up if you think the simulation will update automatically..."* |
+| Opening the .md file | *"Prediction: how many dollar signs will you see in this file?"* |
+| Uploading bank statement | *"Where did the transaction data go? Let's find it."* ← (it's gone) |
+
+---
+
+## Theatrical Pauses (Write them into your delivery)
+
+| Moment | Pause |
+|--------|-------|
+| After showing same number twice | **2 seconds. Let it land.** |
+| After saying "2 milliseconds" | **1 second. Point at the log.** |
+| After opening .md file and finding no dollar amounts | **3 seconds. "Not there."** |
+| Before the closing lines | **1 breath. Slow down to 70% speed.** |
+| After "Thank you" | **Do not fill the silence. Let them clap.** |
+
+---
+
+## Backup Q&A — Judge Questions (rehearse these)
+
+### "Why not just let the LLM do the math? It's getting better."
+
+> *"Because $2,865,086 should not vary between runs. LLMs are probabilistic by design — they produce different outputs for the same input. Compound interest is not probabilistic. For any system where a number drives a financial decision, determinism is not a nice-to-have — it's the minimum bar. We enforce it architecturally, not by hoping the model gets it right."*
+
+### "How is this different from a regular app with some AI on top?"
+
+> *"Three things set this apart. One: the planner LLM dynamically decides which UI panels appear — that's A2UI. A regular app has hardcoded layouts. Two: the reactive engine guarantees consistency across the state graph — a regular app would require the user to manually refresh or re-ask. Three: the conflict resolver makes deterministic trust decisions between data sources in real time. That's not standard app logic."*
+
+### "What happens when Redis goes down?"
+
+> *"StateManager in-process Map takes over. The schema validator still runs. The session still works for the duration of that process. No data is lost from the current request — it's in memory. On restart, the session is fresh. For production, Redis is the durable layer — the same `updateSession` interface works with both."*
+
+### "The conflict resolver — what if document data is wrong?"
+
+> *"Document data has the highest authority rank because it carries an explicit signal — the user chose to upload it. But confidence scores modulate this: a low-confidence document extraction can lose to a high-confidence user statement. And the score is surfaced in the UI as `insight.confidence` — so the user sees a low-confidence indicator and can correct it. The system is transparent about uncertainty."*
+
+### "How do you prevent the LLM from computing numbers if it's in the same chain?"
+
+> *"The prompts are architected so that the LLM receives pre-computed numbers as context and is instructed to write only summary text. But more importantly — the graph architecture enforces this. The simulation node calls `calculateRetirementProjection()` first, then passes the result to the LLM chain. There is no code path where the LLM output is used as a financial number. The only numeric values in the state come from the compute functions."*
+
+### "Is this production-ready?"
+
+> *"The architecture is. The single-process StateManager is the only POC compromise — swap it for Redis hashes and it scales horizontally. ChromaDB has a fallback. Every LLM call has a withFallback(). The schema validator and stale guard are production-grade patterns. What's missing is auth, audit logs, and PDF parsing — known gaps, not architectural ones."*
+
+---
+
+## One-Liners (Have These Ready)
+
+**The elevator pitch:**
+> *"An AI that orchestrates your interface, not just your answer — and guarantees every number with math."*
+
+**For the trust question:**
+> *"We stored your income as UPPER_MIDDLE. The exact figure was garbage collected before any async operation touched it."*
+
+**For the determinism question:**
+> *"Run it a thousand times. Same inputs, same numbers. The LLM only writes the sentence around them."*
+
+**For the reactive question:**
+> *"The dependency graph is hardcoded. PROFILE_UPDATED always triggers simulation, portfolio, and risk. The LLM has no vote on this."*
+
+**The close:**
+> *"Every other AI system gives you a smart answer. This one gives you a smart interface."*
 
 ---
 
 ## Timing Guide
 
-| Act | Topic | Time |
-|-----|-------|------|
-| Setup | Problem statement | 30s |
-| 1 | First question + determinism proof | 90s |
-| 2 | A2UI v2 network tab reveal | 90s |
-| 3 | Reactive engine (income change) | 60s |
-| 4 | Document upload + trust story | 120s |
-| 5 | Priority queue demo | 45s |
-| 6 | Bank statement + memory | 30s |
-| 7 | Close | 60s |
-| **Total** | | **~8.5 min** |
+| # | Act | Time | Cumulative |
+|---|-----|------|-----------|
+| — | Setup | — | pre-demo |
+| — | Problem statement | 1:00 | 1:00 |
+| 1 | System architecture (30s) | 0:45 | 1:45 |
+| 2 | First question + determinism proof | 1:45 | 3:30 |
+| 3 | A2UI network tab reveal | 2:00 | 5:30 |
+| 4 | Reactive engine + stale guard | 1:30 | 7:00 |
+| 5 | Document upload + trust + conflict | 2:00 | 9:00 |
+| 6 | Bank statement + memory | 1:00 | 10:00 |
+| 7 | Architecture flex (logs) | 1:00 | 11:00 |
+| 8 | Close | 1:00 | 12:00 |
 
-> Aim for 7.5 minutes. Judges respect demos that don't run over.
+**Target: finish at 10:30. Never go over 12:00.**
 
 ---
 
-## The One Line That Wins
+## Technical Highlights Card
 
-If you get 30 seconds and nothing else:
-
-> *"Every other AI system gives you a smart answer. This one gives you a smart interface — the AI orchestrates what you see, not just what it says. And every number you see came from math, not the model."*
+```
+┌────────────────────────────────────────────────────────────────┐
+│  AI Financial Planner — v3 Architecture                        │
+├────────────────────────────────────────────────────────────────┤
+│  A2UI v2                                                        │
+│  {id, type, data, meta, insight, actions, version}             │
+│  Server answers WHAT/WHY/HOW/WHEN per panel                    │
+│  version field — client rejects stale renders                  │
+├────────────────────────────────────────────────────────────────┤
+│  Deterministic Engine                                           │
+│  FV formula → projection  (never LLM)                         │
+│  Glide-path → allocation  (never LLM)                         │
+│  3-factor formula → risk  (never LLM)                         │
+├────────────────────────────────────────────────────────────────┤
+│  Priority Event Queue                                           │
+│  HIGH(1) PROFILE_UPDATED pre-empts MEDIUM/LOW                 │
+│  Coalescing: N duplicate events → 1 cascade                    │
+├────────────────────────────────────────────────────────────────┤
+│  StaleGuard                                                     │
+│  AbortController per cascade                                   │
+│  Higher-priority event cancels running cascade mid-step        │
+├────────────────────────────────────────────────────────────────┤
+│  Conflict Resolution                                            │
+│  document_extracted(4) > user_stated(3) > inferred(2)         │
+│  scoreDataQuality → 0.0–1.0 → surfaced in A2UI insight        │
+├────────────────────────────────────────────────────────────────┤
+│  Schema Enforcement                                             │
+│  SchemaValidator blocks grossIncome/monthlySpend/ssn           │
+│  Throws SchemaViolationError — bugs surface immediately        │
+│  OptimisticLockError on _version conflict                      │
+├────────────────────────────────────────────────────────────────┤
+│  Vector DB Isolation                                            │
+│  queryForSession(sessionId, query) — throws if no sessionId   │
+│  storeForSession(sessionId, content) — enforced               │
+├────────────────────────────────────────────────────────────────┤
+│  Stack                                                          │
+│  LangGraph · LangChain · Angular 17 · Node.js · Express       │
+│  Groq/Gemini/OpenAI/Ollama · Redis · ChromaDB                 │
+└────────────────────────────────────────────────────────────────┘
+```
