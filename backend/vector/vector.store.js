@@ -80,6 +80,39 @@ export class VectorStore {
     return ctx;
   }
 
+  /**
+   * Strict session-scoped query — sessionId is REQUIRED.
+   * Throws if no sessionId is provided, preventing cross-session data leaks.
+   * Use this instead of searchAsContext() in all agent code.
+   *
+   * @param {string} sessionId  REQUIRED — enforced
+   * @param {string} query
+   * @returns {Promise<string>}
+   * @throws {Error} if sessionId is missing or empty
+   */
+  async queryForSession(sessionId, query) {
+    if (!sessionId || typeof sessionId !== 'string' || sessionId.trim() === '') {
+      throw new Error('[VectorStore] queryForSession: sessionId is required — refusing to run unscoped query');
+    }
+    log.vector(`queryForSession session=${sessionId} query="${query.slice(0, 60)}..."`);
+    return this.searchAsContext(query, sessionId);
+  }
+
+  /**
+   * Strict session-scoped store — sessionId is REQUIRED.
+   * Throws if no sessionId is provided.
+   *
+   * @param {string} sessionId  REQUIRED
+   * @param {string} content    Abstracted/anonymised content only (no raw PII)
+   * @throws {Error} if sessionId is missing
+   */
+  async storeForSession(sessionId, content) {
+    if (!sessionId || typeof sessionId !== 'string' || sessionId.trim() === '') {
+      throw new Error('[VectorStore] storeForSession: sessionId is required — refusing unscoped write');
+    }
+    return this.storeSessionSnapshot(sessionId, content);
+  }
+
   async storeSessionSnapshot(sessionId, markdownContent) {
     const id = `session:${sessionId}:${Date.now()}`;
     log.vector('storeSessionSnapshot', sessionId, `(${markdownContent.length} chars)`);

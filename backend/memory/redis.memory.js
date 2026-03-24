@@ -1,5 +1,8 @@
 import Redis from 'ioredis';
 import { log } from '../logger.js';
+import { SchemaValidator } from './schema.validator.js';
+
+const _validator = new SchemaValidator();
 
 /**
  * RedisMemory — structured JSON session store.
@@ -76,10 +79,35 @@ export class RedisMemory {
   }
 
   async updateSession(sessionId, partial) {
+    // ── Schema enforcement — block forbidden PII fields before any write ──
+    _validator.validateSessionWrite(partial);
+
     const existing = (await this.getSession(sessionId)) || {};
-    const merged = { ...existing, ...partial, updatedAt: new Date().toISOString() };
+
+    // ── Optimistic locking — version check-and-set ────────────────────────
+    // If the caller passes _expectedVersion and it does not match the stored
+    // version, the write is a stale update — reject it to prevent overwrites.
+    if (partial._expectedVersion !== undefined) {
+      const storedVersion = existing._version ?? 0;
+      if (storedVersion !== partial._expectedVersion) {
+        log.warn(
+          `[RedisMemory] optimistic lock conflict session=${sessionId} ` +
+          `expected=${partial._expectedVersion} got=${storedVersion} — write rejected`,
+        );
+        throw new OptimisticLockError(sessionId, partial._expectedVersion, storedVersion);
+      }
+    }
+    // Strip the sentinel field — never store it
+    const { _expectedVersion: _, ...safePatch } = partial;
+
+    const merged = {
+      ...existing,
+      ...safePatch,
+      _version:   (existing._version ?? 0) + 1,
+      updatedAt:  new Date().toISOString(),
+    };
     await this.saveSession(sessionId, merged);
-    log.redis('updateSession', sessionId, '→ merged keys:', Object.keys(partial).join(', '));
+    log.redis('updateSession', sessionId, `→ merged keys: [${Object.keys(safePatch).join(', ')}] version=${merged._version}`);
     return merged;
   }
 
@@ -102,5 +130,23 @@ export class RedisMemory {
 
   async deleteSession(sessionId) {
     await this._del(`session:${sessionId}`);
+  }
+}
+
+// ── OptimisticLockError ───────────────────────────────────────────────────────
+
+/**
+ * Thrown when a versioned write is rejected due to a concurrent modification.
+ */
+export class OptimisticLockError extends Error {
+  constructor(sessionId, expected, actual) {
+    super(
+      `Optimistic lock conflict for session=${sessionId}: ` +
+      `expected _version=${expected}, stored _version=${actual}`,
+    );
+    this.name     = 'OptimisticLockError';
+    this.sessionId = sessionId;
+    this.expected  = expected;
+    this.actual    = actual;
   }
 }

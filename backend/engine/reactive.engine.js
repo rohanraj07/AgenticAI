@@ -30,6 +30,7 @@ import { computeRiskScore }              from '../agents/compute/risk.compute.js
 import { calculateRetirementProjection } from '../utils/financial.calculator.js';
 import { EVENTS }                        from '../events/event.emitter.js';
 import { PriorityQueue, EVENT_PRIORITY } from './priority.queue.js';
+import { StaleGuard }                   from './stale.guard.js';
 import { log }                           from '../logger.js';
 
 // ── Dependency map ───────────────────────────────────────────────────────────
@@ -163,8 +164,15 @@ export class ReactiveEngine {
      */
     this._pendingCascades = new Map();
 
+    /**
+     * StaleGuard — cancels superseded cascades when a higher-priority event
+     * arrives mid-execution.
+     * @type {StaleGuard}
+     */
+    this._staleGuard = new StaleGuard();
+
     this._attach();
-    log.info('[ReactiveEngine] initialised — dependency map active (v2: priority queue + partial/full recompute)');
+    log.info('[ReactiveEngine] initialised — v3: priority queue + stale guard + partial/full recompute');
   }
 
   // ── Event attachment ───────────────────────────────────────────────────────
@@ -182,16 +190,22 @@ export class ReactiveEngine {
         const priority      = EVENT_PRIORITY[event] ?? 2;
         const recomputeType = RECOMPUTE_TYPE[event]  ?? 'partial';
 
-        // If a cascade is already running for this session, enqueue instead
-        if (this._pendingCascades.has(sessionId)) {
+        // Attempt to register with StaleGuard.
+        // Returns AbortSignal if we can proceed, null if we should enqueue.
+        const signal = this._staleGuard.register(sessionId, priority);
+
+        if (signal === null) {
+          // Lower or equal priority — enqueue behind running cascade
           this._queue.enqueue(event, sessionId, payload, priority);
-          log.info(
-            `[ReactiveEngine] queued ${event} (cascade in progress) session=${sessionId}`,
-          );
+          log.info(`[ReactiveEngine] queued ${event} (cascade in progress) session=${sessionId}`);
           return;
         }
 
-        this._runCascade(sessionId, event, downstream, recomputeType).catch((err) => {
+        // Higher priority arrived — StaleGuard already cancelled the old cascade.
+        // Remove from pendingCascades so _runCascade can proceed.
+        this._pendingCascades.delete(sessionId);
+
+        this._runCascade(sessionId, event, downstream, recomputeType, signal).catch((err) => {
           log.error(`[ReactiveEngine] cascade error: ${err.message}`);
         });
       });
@@ -206,15 +220,16 @@ export class ReactiveEngine {
    * while it was running.
    *
    * @private
-   * @param {string}   sessionId
-   * @param {string}   event
-   * @param {string[]} downstream
-   * @param {string}   recomputeType  'full' | 'partial'
+   * @param {string}      sessionId
+   * @param {string}      event
+   * @param {string[]}    downstream
+   * @param {string}      recomputeType  'full' | 'partial'
+   * @param {AbortSignal} [signal]       Stale-cancellation signal
    */
-  async _runCascade(sessionId, event, downstream, recomputeType) {
+  async _runCascade(sessionId, event, downstream, recomputeType, signal) {
     this._pendingCascades.set(sessionId, event);
     try {
-      await this._cascade(sessionId, event, downstream, recomputeType);
+      await this._cascade(sessionId, event, downstream, recomputeType, signal);
 
       // Drain any events that were enqueued for THIS session while cascading.
       // The full queue is drained but we only act on items for this session
@@ -237,6 +252,7 @@ export class ReactiveEngine {
       }
     } finally {
       this._pendingCascades.delete(sessionId);
+      this._staleGuard.clear(sessionId);
     }
   }
 
@@ -245,14 +261,16 @@ export class ReactiveEngine {
   /**
    * Re-compute each downstream agent in dependency order.
    * Agents are executed sequentially so later ones see updated upstream values.
+   * Checks signal.aborted before each step — exits early if superseded.
    *
    * @private
-   * @param {string}   sessionId
-   * @param {string}   triggerEvent
-   * @param {string[]} downstream
-   * @param {string}   recomputeType  'full' | 'partial'
+   * @param {string}      sessionId
+   * @param {string}      triggerEvent
+   * @param {string[]}    downstream
+   * @param {string}      recomputeType  'full' | 'partial'
+   * @param {AbortSignal} [signal]       Stale-cancellation signal from StaleGuard
    */
-  async _cascade(sessionId, triggerEvent, downstream, recomputeType = 'partial') {
+  async _cascade(sessionId, triggerEvent, downstream, recomputeType = 'partial', signal) {
     const typeLabel = recomputeType.toUpperCase();
     log.info(
       `[ReactiveEngine] ${triggerEvent} → ${typeLabel} cascade | ` +
@@ -264,6 +282,14 @@ export class ReactiveEngine {
     let state = this._state.get(sessionId);
 
     for (const agentName of downstream) {
+      // ── Stale check — abort if superseded by a higher-priority event ──────
+      if (signal?.aborted) {
+        log.warn(
+          `[ReactiveEngine] cascade aborted at ${agentName} (superseded by higher-priority event) session=${sessionId}`,
+        );
+        return;
+      }
+
       const fn = COMPUTE_FN[agentName];
       if (!fn) continue;
 
